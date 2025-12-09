@@ -1,0 +1,162 @@
+# ==============================================
+# TYPACK ETL Project - GitIgnore Configuration
+# ==============================================
+
+# ===== ARCHIVOS DE CONFIGURACIÓN SENSIBLES =====
+# Excluir archivos con credenciales y configuraciones específicas del entorno
+config/config.json
+config/credenciales.json
+
+# ===== DIRECTORIOS DE DATOS =====
+# Excluir todas las carpetas de datos para evitar subir datasets grandes
+data/
+data/*
+data/raw/
+data/processed/
+data/external/
+data/consolidated/
+
+# ===== LOGS Y ARCHIVOS DE SEGUIMIENTO =====
+# Excluir logs y archivos temporales
+logs/
+logs/*
+*.log
+*.log.*
+
+# ===== ENTORNOS VIRTUALES DE PYTHON =====
+.venv/
+venv/
+env/
+.env
+ENV/
+env.bak/
+venv.bak/
+
+# ===== CACHE Y ARCHIVOS COMPILADOS DE PYTHON =====
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# ===== JUPYTER NOTEBOOKS =====
+*.ipynb
+.ipynb_checkpoints/
+*/.ipynb_checkpoints/*
+
+# ===== IDE Y EDITORES =====
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.spyderproject
+.spyproject
+.ropeproject
+
+# ===== ARCHIVOS DEL SISTEMA OPERATIVO =====
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+*.cab
+*.msi
+*.msix
+*.msm
+*.msp
+*.lnk
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+Icon
+._*
+.DocumentRevisions-V100
+.fseventsd
+.Spotlight-V100
+.TemporaryItems
+.Trashes
+.VolumeIcon.icns
+.com.apple.timemachine.donotpresent
+
+# Linux
+*~
+.fuse_hidden*
+.directory
+.Trash-*
+.nfs*
+
+# ===== HERRAMIENTAS DE TESTING =====
+.tox/
+.nox/
+.coverage
+.pytest_cache/
+cover/
+*.cover
+*.py,cover
+.hypothesis/
+.pytest_cache/
+nosetests.xml
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
+
+# ===== SCRIPTS Y HERRAMIENTAS =====
+*.bat
+*.cmd
+*.exe
+
+# ===== DOCKER Y CONTENEDORES =====
+# Mantener Dockerfiles pero excluir archivos temporales
+.docker/
+docker-compose.override.yml
+.dockerignore
+
+# ===== ARCHIVOS TEMPORALES =====
+*.tmp
+*.temp
+*.bak
+*.backup
+*.orig
+
+# ===== VARIABLES DE ENTORNO =====
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+# ===== DOCUMENTACIÓN GENERADA =====
+site/
+docs/_build/
+
+# ===== ARCHIVOS DE DISTRIBUCIÓN Y PAQUETES =====
+*.tar.gz
+*.zip
+*.rar
+*.7z
+
+# ===== BASES DE DATOS LOCALES =====
+*.db
+*.sqlite
+*.sqlite3

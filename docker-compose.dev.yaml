@@ -1,0 +1,46 @@
+# Docker Compose para desarrollo local con volúmenes montados
+version: '3.8'
+
+services:
+  extractor_daily_dev:
+    build:
+      context: .
+      dockerfile: docker/extractor.dockerfile
+      target: development
+    container_name: typack_extractor_daily_dev
+    command: python src/typack_etl/extractor/pipelines/extractor_daily.py --dry-run
+    volumes:
+      - .:/app
+      - ./data:/app/data
+      - ./logs:/app/logs
+    environment:
+      - PYTHONUNBUFFERED=1
+      - TZ=America/Santiago
+      - ENVIRONMENT=development
+    networks:
+      - typack_network
+    stdin_open: true
+    tty: true
+
+  transformer_dev:
+    build:
+      context: .
+      dockerfile: docker/transformer.dockerfile
+    container_name: typack_transformer_dev
+    command: bash -c "tail -f /dev/null"  # Mantener contenedor vivo para debug
+    volumes:
+      - .:/app
+      - ./data:/app/data
+      - ./logs:/app/logs
+    environment:
+      - PYTHONUNBUFFERED=1
+      - TZ=America/Santiago
+      - ENVIRONMENT=development
+    networks:
+      - typack_network
+    stdin_open: true
+    tty: true
+
+networks:
+  typack_network:
+    driver: bridge
