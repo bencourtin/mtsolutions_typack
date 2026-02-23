@@ -43,7 +43,6 @@ import json
 
 def _ensure_src_on_path() -> None:
 	"""Intenta agregar el directorio 'src' al sys.path si no está.
-
 	Esto permite ejecutar el script directamente con `python src/.../test.py`
 	sin tener que usar `-m`, respetando el layout de proyecto basado en `src/`.
 	"""
@@ -181,6 +180,42 @@ def _load_lineas(json_path: Path) -> list[dict]:
 	return []
 
 
+def _load_config() -> dict:
+	"""Carga configuración desde config/config.json."""
+	try:
+		config_path = Path("config/config.json")
+		with config_path.open("r", encoding="utf-8") as f:
+			return json.load(f)
+	except Exception as e:  # noqa: BLE001
+		print(f"Error cargando config.json: {e}")
+	return {}
+
+
+def _get_month_name_spanish(month_num: int) -> str:
+	"""Convierte número de mes (1-12) a nombre en español."""
+	month_names = {
+		1: "enero", 2: "febrero", 3: "marzo", 4: "abril",
+		5: "mayo", 6: "junio", 7: "julio", 8: "agosto",
+		9: "septiembre", 10: "octubre", 11: "noviembre", 12: "diciembre"
+	}
+	return month_names.get(month_num, str(month_num))
+
+
+def _parse_date_components(date_str: str) -> tuple[int, int, str]:
+	"""Extrae año, mes numérico y nombre de mes desde fecha YYYY-MM-DD."""
+	try:
+		date_part = date_str.split(" ")[0]  # Tomar solo la parte de fecha
+		year, month, _ = date_part.split("-")
+		year_int = int(year)
+		month_int = int(month)
+		month_name = _get_month_name_spanish(month_int)
+		return year_int, month_int, month_name
+	except Exception:
+		# Fallback a fecha actual si no se puede parsear
+		now = datetime.now()
+		return now.year, now.month, _get_month_name_spanish(now.month)
+
+
 def _timestamp() -> str:
 	return datetime.now().strftime("%Y%m%d_%H%M%S")
 
@@ -288,7 +323,19 @@ def main(argv: Iterable[str] | None = None) -> int:
 		end = args.end_date
 	devid = args.devid
 
-	logs_dir = Path(args.logs_dir)
+	# Cargar configuración para obtener rutas
+	config = _load_config()
+	raw_path = config.get("paths", {}).get("raw", "data/processed")
+	logs_base_path = config.get("paths", {}).get("logs", "data/processed/logs")
+	
+	# Extraer componentes de fecha para estructura de carpetas
+	year, month_num, month_name = _parse_date_components(start)
+
+	# Configurar directorio de logs con estructura año/mes
+	if args.logs_dir == "data/processed/logs":  # Solo si se usa el default
+		logs_dir = Path(logs_base_path) / str(year) / f"{month_num:02d}"
+	else:
+		logs_dir = Path(args.logs_dir)
 
 	print("Obteniendo token...")
 	token = get_token(args.credenciales)
@@ -299,8 +346,8 @@ def main(argv: Iterable[str] | None = None) -> int:
 		if args.output:
 			out_path = Path(args.output)
 		else:
-			base_dir = Path("data") / "processed"
-			out_name = f"sabana_{_safe_filename(start)}_{_safe_filename(end)}_{_safe_filename(devid)}.csv"
+			base_dir = Path(raw_path) / str(year) / f"{month_num:02d}"
+			out_name = f"produccion_{year}_{month_name}_{_safe_filename(devid)}.csv"
 			out_path = base_dir / out_name
 
 		# Plan y logs para single-line
@@ -351,7 +398,7 @@ def main(argv: Iterable[str] | None = None) -> int:
 		else:
 			base_dir = provided
 	else:
-		base_dir = Path("data") / "processed"
+		base_dir = Path(raw_path) / str(year) / f"{month_num:02d}"
 
 	print(f"Procesando {len(lineas)} líneas definidas en {lineas_path} ...")
 
@@ -360,7 +407,7 @@ def main(argv: Iterable[str] | None = None) -> int:
 	for linea in lineas:
 		ldev = linea.get("devid")
 		lname = linea.get("name", ldev)
-		out_name = f"sabana_{_safe_filename(start)}_{_safe_filename(end)}_{_safe_filename(lname)}_{_safe_filename(str(ldev))}.csv"
+		out_name = f"produccion_{year}_{month_name}_{_safe_filename(lname)}.csv"
 		out_path = base_dir / out_name
 		plan_items.append({
 			"line": lname,
@@ -380,7 +427,7 @@ def main(argv: Iterable[str] | None = None) -> int:
 		try:
 			data = get_sabana_report(token, start, end, ldev)
 			rows = _infer_rows(data)
-			out_name = f"sabana_{_safe_filename(start)}_{_safe_filename(end)}_{_safe_filename(lname)}_{_safe_filename(str(ldev))}.csv"
+			out_name = f"produccion_{year}_{month_name}_{_safe_filename(lname)}.csv"
 			out_path = base_dir / out_name
 			count = write_csv(rows, out_path)
 			global_count += count
@@ -421,5 +468,4 @@ if __name__ == "__main__":  # pragma: no cover
 	except KeyboardInterrupt:
 		print("Interrumpido por el usuario.")
 		raise SystemExit(130)
-	
 	
