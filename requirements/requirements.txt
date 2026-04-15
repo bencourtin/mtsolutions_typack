@@ -1,0 +1,13 @@
+# Dependencias principales
+polars>=0.19.0  # Para manejo de datos y CSV
+tzdata>=2023.3  # Para soporte de zonas horarias
+
+# Dependencias del sistema
+requests>=2.31.0  # Para las llamadas HTTP a la API
+python-dateutil>=2.8.2  # Para manejo de fechas
+pytz>=2023.3  # Para manejo de zonas horarias adicionales
+
+# Dependencias opcionales pero recomendadas
+pandas>=2.0.0  # Para compatibilidad con algunos formatos de datos
+numpy>=1.24.0  # Requerido por pandas y útil para cálculos numéricos
+tqdm>=4.65.0  # Para barras de progreso
