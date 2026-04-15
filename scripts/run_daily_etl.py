@@ -9,13 +9,11 @@ Uso:
     python scripts/run_daily_etl.py --weekly-report  # Genera reporte semanal
 
 Configuración:
-    - config/config.json: Rutas de archivos
-    - config/email_config.json: Configuración de notificaciones
+    - .env: Rutas de archivos, credenciales y email
 """
 
 import subprocess
 import sys
-import json
 import logging
 import os
 from datetime import datetime, timedelta
@@ -23,31 +21,16 @@ from pathlib import Path
 import argparse
 import traceback
 
-# Asegurar que el directorio raíz del proyecto esté en el path
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(PROJECT_ROOT))
-sys.path.insert(0, str(PROJECT_ROOT / "src"))
-
-# Importar después de configurar el path
 from scripts.notify import send_error_alert, send_weekly_report
 from scripts.stats_tracker import StatsTracker
+from config.settings import PATHS
 
-
-def _load_config() -> dict:
-    """Carga configuración principal desde config/config.json."""
-    try:
-        config_path = PROJECT_ROOT / "config" / "config.json"
-        with config_path.open("r", encoding="utf-8") as f:
-            return json.load(f)
-    except Exception as e:
-        print(f"Error cargando config.json: {e}")
-        return {}
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 
 def setup_logging() -> logging.Logger:
     """Configura el sistema de logging."""
-    config = _load_config()
-    logs_path = config.get("paths", {}).get("logs", "logs")
+    logs_path = PATHS.get("logs", "logs")
     
     # Crear directorio de logs si no existe
     log_dir = Path(logs_path) / "scheduler"

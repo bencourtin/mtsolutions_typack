@@ -2,35 +2,10 @@ import os
 import pandas as pd
 from datetime import datetime, time
 from typing import List, Dict
-import json
 from pathlib import Path
 from tqdm import tqdm
 
-def _load_config() -> dict:
-    """Carga configuración desde config/config.json."""
-    try:
-        config_path = Path("config/config.json")
-        with config_path.open("r", encoding="utf-8") as f:
-            return json.load(f)
-    except Exception as e:  # noqa: BLE001
-        print(f"Error cargando config.json: {e}")
-    return {}
-
-
-def _load_horarios() -> dict:
-    """Carga horarios desde config/horarios.json."""
-    try:
-        horarios_path = Path("config/horarios.json")
-        with horarios_path.open("r", encoding="utf-8") as f:
-            horarios = json.load(f)
-            # Convertir strings de hora a objetos time
-            for key, horario in horarios.items():
-                horario['hora_inicio'] = datetime.strptime(horario['hora_inicio'], "%H:%M").time()
-                horario['hora_fin'] = datetime.strptime(horario['hora_fin'], "%H:%M").time()
-            return horarios
-    except Exception as e:
-        print(f"Error cargando horarios.json: {e}")
-    return {}
+from config.settings import PATHS, load_horarios
 
 
 def _get_month_name_spanish(month_num: int) -> str:
@@ -46,8 +21,7 @@ def _get_month_name_spanish(month_num: int) -> str:
 class DataTransformer:
     def __init__(self, base_path: str = None):
         # Load config and use raw path if base_path not provided
-        self.config = _load_config()
-        self.horarios = _load_horarios()
+        self.horarios = load_horarios()
         if base_path:
             # Normalize incoming base path so mixed backslashes/forward-slashes
             # don't produce paths like "...\\Data_MTSolutions/EXT_15/...".
@@ -58,13 +32,12 @@ class DataTransformer:
             self.base_path = os.path.normpath(base_path.replace('\\', os.sep))
         else:
             # Use raw path from config
-            raw_path = self.config.get("paths", {}).get("raw", "data/raw")
+            raw_path = PATHS.get("raw", "data/raw")
             self.base_path = os.path.normpath(raw_path.replace('\\', os.sep))
         
         # Get other paths from config
-        paths = self.config.get("paths", {})
-        self.processed_path = os.path.normpath(paths.get("processed", "data/processed").replace('\\', os.sep))
-        self.consolidated_path = os.path.normpath(paths.get("consolidated", "data/consolidated").replace('\\', os.sep))
+        self.processed_path = os.path.normpath(PATHS.get("processed", "data/processed").replace('\\', os.sep))
+        self.consolidated_path = os.path.normpath(PATHS.get("consolidated", "data/consolidated").replace('\\', os.sep))
         self.column_mappings = {
             'product': 'Producto',
             'code_description': 'Desc_detencion',
@@ -610,7 +583,7 @@ def main():
     # Configuración
     lines = ["TF_2","TF_3","TF_5","TF_6","TF_7","TF_8","TF_9","TF_10","EXT_14","EXT_15","EXT_16"]
     
-    # Crear instancia del transformador (usa config.json automáticamente)
+    # Crear instancia del transformador (usa PATHS desde settings automáticamente)
     transformer = DataTransformer()
     
     # Detectar todos los años disponibles en el directorio raw

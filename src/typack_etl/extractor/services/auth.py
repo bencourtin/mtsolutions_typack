@@ -1,7 +1,8 @@
-import json
 import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
+
+from config.settings import API_USER, API_PASS
 
 # URL base de la API
 BASE_URL = "https://mts2.mtsolutions.io/api"
@@ -23,20 +24,16 @@ def _create_session(retries=3, backoff_factor=0.5, status_forcelist=(500, 502, 5
     session.mount("http://", adapter)
     return session
 
-def get_token(credenciales_path="config/credenciales.json"):
+def get_token():
     """
-    Lee credenciales desde JSON y obtiene el token JWT de autenticación.
+    Obtiene el token JWT de autenticación usando credenciales de settings.
     """
-    # Cargar credenciales desde archivo
-    with open(credenciales_path, "r", encoding="utf-8") as f:
-        creds = json.load(f)
-
     session = _create_session()
     url = f"{BASE_URL}/login"
     payload = {
         "login": {
-            "user": creds["USER"],
-            "password": creds["PASS"],
+            "user": API_USER,
+            "password": API_PASS,
             "locale": "es_CL"  # configuración regional según documentación
         }
     }

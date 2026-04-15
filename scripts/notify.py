@@ -5,10 +5,9 @@ Soporta dos tipos de notificaciones:
 1. Alertas de error inmediatas (cuando falla extracción o transformación)
 2. Reportes semanales con estadísticas de ejecución
 
-Configuración: config/email_config.json
+Configuración: .env (SMTP_*, EMAIL_*)
 """
 
-import json
 import smtplib
 import ssl
 from datetime import datetime
@@ -17,32 +16,12 @@ from email.mime.text import MIMEText
 from pathlib import Path
 from typing import List, Dict, Optional
 
-
-def _load_email_config() -> dict:
-    """Carga configuración de email desde config/email_config.json."""
-    try:
-        config_path = Path("config/email_config.json")
-        with config_path.open("r", encoding="utf-8") as f:
-            return json.load(f)
-    except Exception as e:
-        print(f"Error cargando email_config.json: {e}")
-        return {}
+from config.settings import EMAIL_CONFIG, PATHS
 
 
-def _load_main_config() -> dict:
-    """Carga configuración principal desde config/config.json."""
-    try:
-        config_path = Path("config/config.json")
-        with config_path.open("r", encoding="utf-8") as f:
-            return json.load(f)
-    except Exception as e:
-        print(f"Error cargando config.json: {e}")
-        return {}
-
-
-def _create_smtp_connection(config: dict):
-    """Crea conexión SMTP con la configuración proporcionada."""
-    smtp_config = config.get("smtp", {})
+def _create_smtp_connection():
+    """Crea conexión SMTP con la configuración de settings."""
+    smtp_config = EMAIL_CONFIG.get("smtp", {})
     server = smtp_config.get("server", "smtp.gmail.com")
     port = smtp_config.get("port", 587)
     use_tls = smtp_config.get("use_tls", True)
@@ -80,13 +59,11 @@ def _send_email(
     Returns:
         True si se envió correctamente, False en caso contrario
     """
-    config = _load_email_config()
-    
-    if not config.get("enabled", False):
+    if not EMAIL_CONFIG.get("enabled", False):
         print("Notificaciones por email deshabilitadas en config.")
         return False
     
-    sender_config = config.get("sender", {})
+    sender_config = EMAIL_CONFIG.get("sender", {})
     sender_email = sender_config.get("email", "")
     sender_name = sender_config.get("name", "ETL Typack")
     
@@ -112,7 +89,7 @@ def _send_email(
         msg.attach(part1)
         msg.attach(part2)
         
-        with _create_smtp_connection(config) as server:
+        with _create_smtp_connection() as server:
             server.sendmail(sender_email, recipients, msg.as_string())
         
         print(f"Email enviado a: {', '.join(recipients)}")
@@ -139,8 +116,7 @@ def send_error_alert(
     Returns:
         True si se envió correctamente
     """
-    config = _load_email_config()
-    recipients = config.get("recipients", {}).get("error", [])
+    recipients = EMAIL_CONFIG.get("recipients", {}).get("error", [])
     
     if not recipients:
         print("No hay destinatarios configurados para alertas de error.")
@@ -214,8 +190,7 @@ def send_weekly_report(stats: Dict) -> bool:
     Returns:
         True si se envió correctamente
     """
-    config = _load_email_config()
-    recipients = config.get("recipients", {}).get("weekly_report", [])
+    recipients = EMAIL_CONFIG.get("recipients", {}).get("weekly_report", [])
     
     if not recipients:
         print("No hay destinatarios configurados para reporte semanal.")
@@ -386,8 +361,7 @@ def send_weekly_report(stats: Dict) -> bool:
 
 def send_test_email() -> bool:
     """Envía un email de prueba para verificar la configuración."""
-    config = _load_email_config()
-    recipients = config.get("recipients", {}).get("error", [])
+    recipients = EMAIL_CONFIG.get("recipients", {}).get("error", [])
     
     if not recipients:
         print("No hay destinatarios configurados.")
@@ -408,10 +382,6 @@ def send_test_email() -> bool:
 
 if __name__ == "__main__":
     import sys
-    
-    # Añadir path del proyecto para importar stats_tracker
-    PROJECT_ROOT = Path(__file__).resolve().parent.parent
-    sys.path.insert(0, str(PROJECT_ROOT))
     
     if len(sys.argv) > 1 and sys.argv[1] == "--test":
         print("Enviando email de prueba...")

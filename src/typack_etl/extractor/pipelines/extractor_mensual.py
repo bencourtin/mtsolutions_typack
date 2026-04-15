@@ -2,10 +2,8 @@
 Parámetros:
 	--start-date  Fecha/hora inicio (cadena que acepta la API). Si no se indica, se usa el 1er día del mes en curso a las 00:00.
 	--end-date    Fecha/hora fin (cadena que acepta la API).    Si no se indica, se usa el último día del mes en curso a las 23:59:59.
-	--devid       (Opcional) Identificador de la línea/máquina para filtrar. Si se omite se descargan todas las líneas definidas en lineas.json.
+	--devid       (Opcional) Identificador de la línea/máquina para filtrar. Si se omite se descargan todas las líneas definidas en config/lineas.json.
   --output      (Opcional) Ruta del CSV de salida. Por defecto, data/processed/...
-  --credenciales (Opcional) Ruta al JSON de credenciales. Por defecto, config/credenciales.json
-	--lineas-json (Opcional) Ruta al JSON con las líneas (name,devid). Default: config/lineas.json
   --logs-dir    (Opcional) Directorio donde se guardarán plan_*.csv y results_*.csv (default: data/processed/logs)
   --no-progress (Flag) Si se incluye, no muestra barra de progreso en modo multi-línea
 
@@ -20,40 +18,15 @@ from __future__ import annotations
 import argparse
 import csv
 import os
-import sys
 from pathlib import Path
 from typing import Iterable, List, Mapping, Sequence
 import calendar
 from datetime import datetime
 import time
-import json
 
-
-def _ensure_src_on_path() -> None:
-	"""Intenta agregar el directorio 'src' al sys.path si no está.
-	Esto permite ejecutar el script directamente con `python src/.../test.py`
-	sin tener que usar `-m`, respetando el layout de proyecto basado en `src/`.
-	"""
-	# Si ya podemos importar, no hacemos nada (se intentará más abajo).
-	# Buscamos 'src' ascendiendo desde este archivo.
-	here = Path(__file__).resolve()
-	for parent in here.parents:
-		candidate = parent / "src"
-		if candidate.is_dir():
-			sp = str(candidate)
-			if sp not in sys.path:
-				sys.path.insert(0, sp)
-			break
-
-
-# Intentar importación directa; si falla, ajustar sys.path y reintentar
-try:  # pragma: no cover - simple robustez de ejecución
-	from typack_etl.extractor.services.auth import get_token
-	from typack_etl.extractor.services.reports import get_sabana_report
-except Exception:  # noqa: BLE001
-	_ensure_src_on_path()
-	from typack_etl.extractor.services.auth import get_token
-	from typack_etl.extractor.services.reports import get_sabana_report
+from typack_etl.extractor.services.auth import get_token
+from typack_etl.extractor.services.reports import get_sabana_report
+from config.settings import PATHS, load_lineas
 
 
 def _infer_rows(data) -> List[Mapping]:
@@ -147,36 +120,7 @@ def write_csv(rows: Sequence[Mapping], output_path: Path) -> int:
 	return len(rows)
 
 
-def _load_lineas(json_path: Path) -> list[dict]:
-	"""Carga lista de lineas desde JSON con estructura {"lineas": [{"name":..., "devid":...}, ...]}.
 
-	Retorna lista de dicts con claves 'name' y 'devid'. Si hay error, retorna lista vacía.
-	"""
-	try:
-		with json_path.open("r", encoding="utf-8") as f:
-			data = json.load(f)
-		items = data.get("lineas", [])
-		out = []
-		for it in items:
-			if isinstance(it, dict) and "devid" in it:
-				out.append({"name": str(it.get("name", it["devid"])), "devid": it["devid"]})
-		return out
-	except FileNotFoundError:
-		print(f"Aviso: no se encontró lineas.json en {json_path}.")
-	except Exception as e:  # noqa: BLE001
-		print(f"Error leyendo lineas.json: {e}")
-	return []
-
-
-def _load_config() -> dict:
-	"""Carga configuración desde config/config.json."""
-	try:
-		config_path = Path("config/config.json")
-		with config_path.open("r", encoding="utf-8") as f:
-			return json.load(f)
-	except Exception as e:  # noqa: BLE001
-		print(f"Error cargando config.json: {e}")
-	return {}
 
 
 def _get_month_name_spanish(month_num: int) -> str:
@@ -266,21 +210,9 @@ def parse_args(argv: Iterable[str] | None = None):
 	)
 	parser.add_argument("--devid", required=False, help="ID de la línea/máquina (opcional)")
 	parser.add_argument(
-		"--lineas-json",
-		required=False,
-		default="config/lineas.json",
-		help="Ruta al JSON que contiene las líneas (default: config/lineas.json)",
-	)
-	parser.add_argument(
 		"--output",
 		required=False,
 		help="Ruta del CSV de salida. Por defecto data/processed/sabana_...csv",
-	)
-	parser.add_argument(
-		"--credenciales",
-		required=False,
-		default="config/credenciales.json",
-		help="Ruta al JSON de credenciales (default: config/credenciales.json)",
 	)
 	parser.add_argument(
 		"--logs-dir",
@@ -312,9 +244,8 @@ def main(argv: Iterable[str] | None = None) -> int:
 	devid = args.devid
 
 	# Cargar configuración para obtener rutas
-	config = _load_config()
-	raw_path = config.get("paths", {}).get("raw", "data/processed")
-	logs_base_path = config.get("paths", {}).get("logs", "data/processed/logs")
+	raw_path = PATHS.get("raw", "data/processed")
+	logs_base_path = PATHS.get("logs", "data/processed/logs")
 	
 	# Extraer componentes de fecha para estructura de carpetas
 	year, month_num, month_name = _parse_date_components(start)
@@ -326,7 +257,7 @@ def main(argv: Iterable[str] | None = None) -> int:
 		logs_dir = Path(args.logs_dir)
 
 	print("Obteniendo token...")
-	token = get_token(args.credenciales)
+	token = get_token()
 
 	# Si se especifica un devid, flujo original (una sola línea)
 	if devid:
@@ -369,9 +300,8 @@ def main(argv: Iterable[str] | None = None) -> int:
 			print("Advertencia: no se recibieron filas para los parámetros indicados.")
 		return 0
 
-	# Modo multi-línea: cargar lineas.json y procesar todas
-	lineas_path = Path(args.lineas_json)
-	lineas = _load_lineas(lineas_path)
+	# Modo multi-línea: cargar líneas desde settings y procesar todas
+	lineas = load_lineas()
 	if not lineas:
 		print("No se encontraron líneas para procesar. Finalizando.")
 		return 1
@@ -388,7 +318,7 @@ def main(argv: Iterable[str] | None = None) -> int:
 	else:
 		base_dir = Path(raw_path) / str(year) / f"{month_num:02d}"
 
-	print(f"Procesando {len(lineas)} líneas definidas en {lineas_path} ...")
+	print(f"Procesando {len(lineas)} líneas definidas en config/lineas.json ...")
 
 	# Construir plan previo
 	plan_items = []

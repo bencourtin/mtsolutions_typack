@@ -1,9 +1,13 @@
 {
     "Termoformado_dia": {
+        "Turno": "TD",
+        "Linea": "Termoformado",
         "hora_inicio": "08:00",
         "hora_fin": "18:00"
     },
     "Termoformado_noche": {
+        "Turno": "TN",
+        "Linea": "Termoformado",
         "hora_inicio": "22:00",
         "hora_fin": "08:00"
     }

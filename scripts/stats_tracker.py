@@ -12,24 +12,14 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Dict, List, Optional
 
-
-def _load_config() -> dict:
-    """Carga configuración principal desde config/config.json."""
-    try:
-        config_path = Path("config/config.json")
-        with config_path.open("r", encoding="utf-8") as f:
-            return json.load(f)
-    except Exception as e:
-        print(f"Error cargando config.json: {e}")
-        return {}
+from config.settings import PATHS
 
 
 class StatsTracker:
     """Clase para registrar y consultar estadísticas de ejecución del ETL."""
     
     def __init__(self):
-        config = _load_config()
-        logs_path = config.get("paths", {}).get("logs", "logs")
+        logs_path = PATHS.get("logs", "logs")
         self.stats_dir = Path(logs_path) / "stats"
         self.stats_dir.mkdir(parents=True, exist_ok=True)
         self.stats_file = self.stats_dir / "execution_stats.json"

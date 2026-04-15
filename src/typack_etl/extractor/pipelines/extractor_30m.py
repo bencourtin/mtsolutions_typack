@@ -33,30 +33,13 @@ import calendar
 import csv
 import json
 import os
-import sys
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Iterable, List, Mapping, Sequence
 
 
-def _ensure_src_on_path() -> None:
-	here = Path(__file__).resolve()
-	for parent in here.parents:
-		candidate = parent / "src"
-		if candidate.is_dir():
-			sp = str(candidate)
-			if sp not in sys.path:
-				sys.path.insert(0, sp)
-			break
-
-
-try:  # pragma: no cover
-	from typack_etl.extractor.services.auth import get_token
-	from typack_etl.extractor.services.reports import get_sabana_report
-except Exception:  # noqa: BLE001
-	_ensure_src_on_path()
-	from typack_etl.extractor.services.auth import get_token
-	from typack_etl.extractor.services.reports import get_sabana_report
+from typack_etl.extractor.services.auth import get_token
+from typack_etl.extractor.services.reports import get_sabana_report
 
 
 def _safe_filename(text: str) -> str:

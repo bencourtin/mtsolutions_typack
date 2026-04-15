@@ -3,10 +3,13 @@
 # ==============================================
 
 # ===== ARCHIVOS DE CONFIGURACIÓN SENSIBLES =====
-# Excluir archivos con credenciales y configuraciones específicas del entorno
+# Excluir .env con secretos (credenciales, SMTP, rutas)
+.env
+
+# Archivos JSON legacy (ya migrados a .env + settings.py)
 config/config.json
 config/credenciales.json
-config/lineas.json
+config/email_config.json
 
 # ===== DIRECTORIOS DE DATOS =====
 # Excluir todas las carpetas de datos para evitar subir datasets grandes
@@ -17,12 +20,22 @@ data/processed/
 data/external/
 data/consolidated/
 
+# ===== DIRECTORIOS DE NOTEBOOKS =====
+# Excluir notebooks para evitar subir archivos grandes y específicos del entorno
+notebooks/
+notebooks/*
+
+# ===== Tests y resultados de pruebas =====
+tests/
+
 # ===== LOGS Y ARCHIVOS DE SEGUIMIENTO =====
 # Excluir logs y archivos temporales
 logs/
 logs/*
 *.log
 *.log.*
+
+
 
 # ===== ENTORNOS VIRTUALES DE PYTHON =====
 .venv/
