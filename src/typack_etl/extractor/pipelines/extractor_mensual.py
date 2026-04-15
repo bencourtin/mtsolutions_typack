@@ -1,16 +1,4 @@
 """
-Script de prueba para descargar el reporte "sabana" usando los servicios
-auth.get_token y reports.get_sabana_report, guardando el resultado en CSV.
-
-Uso (recomendado):
-  - Como módulo (mantiene imports limpios con layout src/):
-	  python -m src.typack_etl.extractor.pipelines.test \
-		  --start-date 2025-01-01 --end-date 2025-01-02 --devid 1234
-
-  - O directamente al archivo (intenta ajustar sys.path automáticamente):
-	  python src/typack_etl/extractor/pipelines/test.py \
-		  --start-date 2025-01-01 --end-date 2025-01-02
-
 Parámetros:
 	--start-date  Fecha/hora inicio (cadena que acepta la API). Si no se indica, se usa el 1er día del mes en curso a las 00:00.
 	--end-date    Fecha/hora fin (cadena que acepta la API).    Si no se indica, se usa el último día del mes en curso a las 23:59:59.
