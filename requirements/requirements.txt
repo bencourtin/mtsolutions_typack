@@ -6,6 +6,7 @@ tzdata>=2023.3  # Para soporte de zonas horarias
 requests>=2.31.0  # Para las llamadas HTTP a la API
 python-dateutil>=2.8.2  # Para manejo de fechas
 pytz>=2023.3  # Para manejo de zonas horarias adicionales
+dotenv>=0.21.0  # Para cargar variables de entorno desde .env
 
 # Dependencias opcionales pero recomendadas
 pandas>=2.0.0  # Para compatibilidad con algunos formatos de datos
