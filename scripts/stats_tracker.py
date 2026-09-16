@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 from config.settings import PATHS
+from typack_etl.audit.publicar import resumen as resumen_reasignaciones
 
 
 class StatsTracker:
@@ -181,7 +182,21 @@ class StatsTracker:
         
         # Ordenar por número de días sin datos (mayor primero)
         lines_without_data.sort(key=lambda x: x["days_count"], reverse=True)
-        
+
+        # Reasignaciones detectadas en la semana. Sale del libro de auditoría,
+        # no de las estadísticas de ejecución: es lo que cambió en el dato, no
+        # cómo corrió el proceso.
+        try:
+            reasignaciones = resumen_reasignaciones(
+                Path(PATHS.get("audit", "data/audit")),
+                week_start.strftime("%Y-%m-%d"),
+                week_end.strftime("%Y-%m-%d"),
+            )
+        except (OSError, ValueError) as e:
+            # El reporte semanal vale aunque el libro no se pueda leer.
+            print(f"No se pudo resumir el libro de auditoría: {e}")
+            reasignaciones = None
+
         return {
             "week_start": week_start.strftime("%Y-%m-%d"),
             "week_end": week_end.strftime("%Y-%m-%d"),
@@ -191,6 +206,7 @@ class StatsTracker:
             "total_rows_extracted": total_rows_extracted,
             "total_rows_transformed": total_rows_transformed,
             "lines_without_data": lines_without_data,
+            "reasignaciones": reasignaciones,
             "errors": list(set(all_errors))[:20],  # Únicos, máximo 20
             "execution_dates": sorted(set(s.get("date", "") for s in week_stats))
         }
@@ -249,20 +265,11 @@ class StatsTracker:
 
 
 if __name__ == "__main__":
-    # Test básico
-    tracker = StatsTracker()
-    
-    # Simular una ejecución
-    tracker.record_execution(
-        success=True,
-        rows_extracted=1500,
-        rows_transformed=1450,
-        duration_seconds=120,
-        lines_without_data=["TF_10"]
-    )
-    
-    # Obtener estadísticas
-    weekly = tracker.get_weekly_stats()
+    # SÓLO LECTURA. Antes esto insertaba una ejecución inventada
+    # (1500 filas, TF_10 sin datos) en el archivo de estadísticas, y la
+    # documentación lo recomendaba como "comando útil para ver el estado":
+    # cada consulta contaminaba las métricas de producción.
+    weekly = StatsTracker().get_weekly_stats()
     if weekly:
         print("Estadísticas semanales:")
         print(json.dumps(weekly, indent=2, ensure_ascii=False))

@@ -1,11 +1,32 @@
 import os
+import argparse
 import pandas as pd
-from datetime import datetime, time
+from datetime import datetime
 from typing import List, Dict
 from pathlib import Path
 from tqdm import tqdm
 
-from config.settings import PATHS, load_horarios
+from config.settings import PATHS, load_horarios, load_lineas
+from typack_etl.extractor.utils.date_utils import CORTE_LOCAL, a_local
+from typack_etl.transformer.turnos import Caso, Horarios, sin_horas_extra
+
+
+def _a_hora_local(serie: pd.Series) -> pd.Series:
+    """Reloj del proveedor -> hora local de planta.
+
+    El raw guarda los timestamps tal como los manda la API. Ese reloj es hora
+    chilena, pero con las reglas de horario de verano que el país usó hasta
+    2018, así que va una hora adelantado durante unas nueve semanas al año
+    (ver `date_utils.a_local`). En esas ventanas, sin esta conversión, toda
+    regla horaria de más abajo —turno, minutos extras, día operativo, fin de
+    semana— queda corrida.
+
+    Se convierte acá, en la frontera de entrada, y no en el raw: la identidad
+    de un segmento en el libro de auditoría es sha1(devid + start + end) con
+    los valores del proveedor, así que reescribir el raw re-keyearía todo el
+    histórico.
+    """
+    return serie.map(lambda momento: a_local(momento) if pd.notna(momento) else pd.NaT)
 
 
 def _get_month_name_spanish(month_num: int) -> str:
@@ -19,9 +40,24 @@ def _get_month_name_spanish(month_num: int) -> str:
 
 
 class DataTransformer:
-    def __init__(self, base_path: str = None):
+    """Aplica las reglas de negocio sobre los datos crudos de la sábana.
+
+    Las tres rutas son parametrizables. `base_path` por sí solo NO aísla el
+    transformador: las salidas siguen saliendo de PATHS, o sea de producción.
+    Para trabajar sobre datos de prueba hay que pasar también
+    `processed_path` y `consolidated_path`.
+    """
+
+    def __init__(
+        self,
+        base_path: str = None,
+        test_mode: bool = False,
+        processed_path: str = None,
+        consolidated_path: str = None,
+    ):
         # Load config and use raw path if base_path not provided
-        self.horarios = load_horarios()
+        self.horarios = Horarios(load_horarios())
+        self.test_mode = test_mode
         if base_path:
             # Normalize incoming base path so mixed backslashes/forward-slashes
             # don't produce paths like "...\\Data_MTSolutions/EXT_15/...".
@@ -35,9 +71,15 @@ class DataTransformer:
             raw_path = PATHS.get("raw", "data/raw")
             self.base_path = os.path.normpath(raw_path.replace('\\', os.sep))
         
-        # Get other paths from config
-        self.processed_path = os.path.normpath(PATHS.get("processed", "data/processed").replace('\\', os.sep))
-        self.consolidated_path = os.path.normpath(PATHS.get("consolidated", "data/consolidated").replace('\\', os.sep))
+        # Rutas de salida: explícitas > modo test > configuración
+        def _salida(explicita, clave, default):
+            if explicita:
+                return os.path.normpath(str(explicita).replace('\\', os.sep))
+            ruta = PATHS.get(clave, default).replace('\\', os.sep).rstrip(os.sep)
+            return os.path.normpath(ruta + "_test" if test_mode else ruta)
+
+        self.processed_path = _salida(processed_path, "processed", "data/processed")
+        self.consolidated_path = _salida(consolidated_path, "consolidated", "data/consolidated")
         self.column_mappings = {
             'product': 'Producto',
             'code_description': 'Desc_detencion',
@@ -59,14 +101,27 @@ class DataTransformer:
             'code_t': 'Cod_detencion_3',
             'code_l': 'Cod_detencion_4',
             'code_m': 'Cod_detencion_5',
-            'code_n': 'Cod_detencion_6'
+            'code_n': 'Cod_detencion_6',
+            # Trazabilidad hacia el libro de auditoría (ver typack_etl.audit.traza)
+            'record_key': 'Record_Key',
+            'run_id_alta': 'Run_Id_Alta',
+            'run_id_version': 'Run_Id_Version',
+            'reasignada': 'Reasignada',
+            'fecha_reasignacion': 'Fecha_Reasignacion',
         }
         self.columns_to_drop = ['end_utc', 'start_utc']
-        self.column_order = ['Año', 'Mes', 'Fecha_Hora_Inicio', 'Fecha_Hora_Termino', 'Planta',
+        # Columnas que deben quedar como texto para poder usar el accesor .str
+        self.text_columns = ['Producto', 'Desc_detencion', 'Sku', 'Comentarios', 'Planta',
+                             'Tipo_Unidad', 'Usuario', 'Maquina', 'Linea', 'Turno',
+                             'Cod_detencion_1', 'Cod_detencion_2', 'Cod_detencion_3',
+                             'Cod_detencion_4', 'Cod_detencion_5', 'Cod_detencion_6']
+        self.column_order = ['Año', 'Mes', 'Dia_Operativo', 'Fecha_Hora_Inicio', 'Fecha_Hora_Termino', 'Planta',
                            'Linea', 'Maquina', 'Turno', 'OF', 'Usuario', 'Producto', 'Sku', 'Tipo_Unidad',
                            'Q_prod_total', 'Duracion(min)', 'Cod_detencion_1', 'Cod_detencion_2',
                            'Cod_detencion_3', 'Cod_detencion_4', 'Cod_detencion_5', 'Cod_detencion_6',
-                           'Desc_detencion', 'Comentarios']
+                           'Desc_detencion', 'Comentarios',
+                           'Reasignada', 'Fecha_Reasignacion',
+                           'Record_Key', 'Run_Id_Alta', 'Run_Id_Version']
 
     def read_line_data(self, line_name: str, year: str, month: str) -> pd.DataFrame:
         """Lee los datos de una línea específica para un mes y año."""
@@ -129,6 +184,15 @@ class DataTransformer:
         # Eliminar columnas no deseadas
         df = df.drop(columns=[col for col in self.columns_to_drop if col in df.columns])
 
+        # Normalizar a texto las columnas de código y descripción. Una columna
+        # enteramente vacía la lee pandas como float64, y entonces el accesor
+        # .str que usan las reglas de más abajo falla. Antes esto ocurría de
+        # rebote al reconstruir el DataFrame en el split de medianoche; ahora
+        # que el split no existe, se hace explícito.
+        for col in self.text_columns:
+            if col in df.columns:
+                df[col] = df[col].astype(object).where(df[col].notna(), pd.NA)
+
         # Limpiar columna OF: convertir valores como "1234.0" o "1234,0" a entero
         if 'OF' in df.columns:
             df['OF'] = (
@@ -176,14 +240,37 @@ class DataTransformer:
         # Convertir las columnas de fecha a datetime (Solución definitiva y segura)
         df['Fecha_Hora_Inicio'] = pd.to_datetime(df['Fecha_Hora_Inicio'], format='mixed', dayfirst=True)
         df['Fecha_Hora_Termino'] = pd.to_datetime(df['Fecha_Hora_Termino'], format='mixed', dayfirst=True)
-        
-        # Dividir registros que cruzan medianoche<
-        df = self._split_midnight_crossings(df)
-        
-        # Extraer Año y Mes de Fecha_Hora_Inicio (después de la división para tener valores correctos)
-        df['Año'] = df['Fecha_Hora_Inicio'].dt.year
-        df['Mes'] = df['Fecha_Hora_Inicio'].dt.month
-        
+
+        # De acá para abajo, todo está en hora local de planta: es el reloj de
+        # los turnos y el único en que las reglas horarias son correctas.
+        df['Fecha_Hora_Inicio'] = _a_hora_local(df['Fecha_Hora_Inicio'])
+        df['Fecha_Hora_Termino'] = _a_hora_local(df['Fecha_Hora_Termino'])
+
+        # El turno sale de la hora de inicio, ya en hora local. Sólo se calcula
+        # donde el origen no sabe (T0, '-', vacío); un turno que ya vino del
+        # proveedor se respeta, salvo en el hueco 18:00-23:00 de Termoformado.
+        # Ver `transformer.turnos` para las tres reglas y por qué no viven en
+        # el JSON.
+        clasificado = [
+            self.horarios.clasificar(linea, turno, inicio)
+            for linea, turno, inicio in zip(df['Linea'], df['Turno'], df['Fecha_Hora_Inicio'])
+        ]
+        df['Turno'] = [c[0] for c in clasificado]
+        # `_caso_turno` es de trabajo: dice de dónde salió el turno, lo usa el
+        # cálculo de horas extra y se descarta antes de guardar.
+        df['_caso_turno'] = [c[1] for c in clasificado]
+        self._avisar_turnos_sin_resolver(df)
+
+        # Año y Mes operativos, no de calendario: el día operativo va de corte a
+        # corte (08:00 locales, el cambio de turno TD/TN), de modo que el turno
+        # de noche del último día del mes cuenta entero en ese mes. Coincide con
+        # el particionado de archivos que hace el extractor, que hace el mismo
+        # corte en el reloj de la API.
+        dia_op = df['Fecha_Hora_Inicio'] - pd.Timedelta(hours=CORTE_LOCAL.hour, minutes=CORTE_LOCAL.minute)
+        df['Año'] = dia_op.dt.year
+        df['Mes'] = dia_op.dt.month
+        df['Dia_Operativo'] = dia_op.dt.date
+
         # Crear máscaras para los criterios
         es_termoformado = df['Linea'].str.lower().str.strip() == 'termoformado'
         es_no_asignado = df['Cod_detencion_3'].str.lower().str.strip() == 'no asignado'
@@ -258,6 +345,10 @@ class DataTransformer:
                (df['Desc_detencion'].notna() & df['Desc_detencion'].str.strip().ne(''))
         df.loc[mask, 'Tipo_registro'] = 'detencion'
 
+        # `_caso_turno` era de trabajo: ya lo consumió el cálculo de extras y
+        # no forma parte del esquema que lee el BI.
+        df = df.drop(columns=['_caso_turno'], errors='ignore')
+
         # Reordenar columnas (solo las que existen en el DataFrame)
         valid_columns = [col for col in self.column_order if col in df.columns]
         remaining_columns = [col for col in df.columns if col not in valid_columns and col != 'Tipo_registro']
@@ -265,15 +356,39 @@ class DataTransformer:
 
         return df
     
+    def _avisar_turnos_sin_resolver(self, df) -> None:
+        """Informa los turnos que no se pudieron calcular con el config.
+
+        Son casos que el JSON no cubre, no errores de datos: si quedan muchos,
+        falta cargar una vigencia o los días de fin de semana.
+        """
+        casos = df['_caso_turno'].value_counts()
+        sin_vigencia = int(casos.get(Caso.SIN_VIGENCIA, 0))
+        fin_de_semana = int(casos.get(Caso.FIN_DE_SEMANA, 0))
+        if sin_vigencia:
+            primera = df.loc[df['_caso_turno'] == Caso.SIN_VIGENCIA, 'Fecha_Hora_Inicio'].min()
+            print(f"  AVISO: {sin_vigencia} filas sin vigencia aplicable en horarios.json "
+                  f"(la más antigua, {primera}). Conservan el turno de origen.")
+        if fin_de_semana:
+            print(f"  AVISO: {fin_de_semana} filas de sábado/domingo sin turno de origen; "
+                  "horarios.json no define esos días. Se clasifican como TD sin horas extra.")
+
     def _calcular_minutos_extras(self, row) -> float:
         """Calcula los minutos extras trabajados después del horario de término.
         Solo aplica para línea TERMOFORMADO con Q_prod_total > 0.
+        Si el TD (Turno Día) cae en fin de semana, todo el tiempo trabajado es considerado extra.
         """
         minutos_extras = 0
         linea = row['Linea']
         
         # Solo aplicar la lógica a la línea TERMOFORMADO
         if linea.upper().strip() != 'TERMOFORMADO':
+            return minutos_extras
+
+        # Fin de semana y filas sin vigencia: el turno lo pusimos nosotros sin
+        # un horario del config detrás, así que no hay fin de jornada contra el
+        # cual medir el exceso. Decisión del 2026-09-16.
+        if sin_horas_extra(row.get('_caso_turno', '')):
             return minutos_extras
         
         # Solo aplicar si hay producción (Q_prod_total > 0)
@@ -284,24 +399,20 @@ class DataTransformer:
         termino = row['Fecha_Hora_Termino']
         turno_actual = row['Turno']
         
-        # Seleccionar el horario según el turno de la fila
+        # Si TD cae en fin de semana (sábado=5, domingo=6), todo el tiempo es extra
         if turno_actual == 'TD':
-            horario = self.horarios.get('Termoformado_dia')
-        elif turno_actual == 'TN':
-            horario = self.horarios.get('Termoformado_noche')
-        else:
+            day_of_week = inicio.weekday()
+            if day_of_week >= 5:  # Sábado o domingo
+                minutos_extras = (termino - inicio).total_seconds() / 60
+                return minutos_extras
+
+        # El fin sale del JSON, no de la extensión del hueco: el Día de
+        # Termoformado se clasifica hasta las 23:00 pero termina oficialmente a
+        # las 18:00, y lo trabajado después de esa hora es justamente lo extra.
+        hora_fin = self.horarios.fin_de_turno(linea, turno_actual, inicio)
+        if hora_fin is None:
             return minutos_extras
-        
-        if not horario:
-            return minutos_extras
-        
-        hora_inicio = datetime.combine(inicio.date(), horario['hora_inicio'])
-        hora_fin = datetime.combine(inicio.date(), horario['hora_fin'])
-        
-        # Ajustar para turnos nocturnos
-        if hora_fin <= hora_inicio:
-            hora_fin += pd.Timedelta(days=1)
-        
+
         # Calcular minutos extras según la lógica especificada
         if inicio >= hora_fin:
             # Si el inicio es mayor o igual a hora_fin: Fecha_Hora_Termino - Fecha_Hora_Inicio
@@ -323,20 +434,10 @@ class DataTransformer:
         if linea.upper().strip() != 'TERMOFORMADO':
             return None
         
-        # Seleccionar el horario según el turno
-        if turno_actual == 'TD':
-            horario = self.horarios.get('Termoformado_dia')
-        elif turno_actual == 'TN':
-            horario = self.horarios.get('Termoformado_noche')
-        else:
+        franja = self.horarios.franja(turno_actual, row['Fecha_Hora_Inicio'])
+        if franja is None:
             return None
-        
-        if not horario:
-            return None
-        
-        # Devolver la hora de término como string
-        hora_fin = horario['hora_fin']
-        return hora_fin.strftime("%H:%M")
+        return franja[1].strftime("%H:%M")
     
     def _determinar_periodo_laboral(self, row):
         """Determina si el registro está en periodo laboral.
@@ -356,120 +457,28 @@ class DataTransformer:
             return 'No'
         
         turno_actual = row['Turno']
-        
-        # Seleccionar el horario según el turno
-        if turno_actual == 'TD':
-            horario = self.horarios.get('Termoformado_dia')
-        elif turno_actual == 'TN':
-            horario = self.horarios.get('Termoformado_noche')
-        else:
+
+        franja = self.horarios.franja(turno_actual, inicio)
+        if franja is None:
             return None
-        
-        if not horario:
-            return None
-        
-        hora_inicio_turno = datetime.combine(inicio.date(), horario['hora_inicio'])
-        hora_fin_turno = datetime.combine(inicio.date(), horario['hora_fin'])
-        
+        arranca, termina = franja
+
+        hora_inicio_turno = datetime.combine(inicio.date(), arranca)
+        hora_fin_turno = datetime.combine(inicio.date(), termina)
+
         # Ajustar para turnos nocturnos
         if hora_fin_turno <= hora_inicio_turno:
             hora_fin_turno += pd.Timedelta(days=1)
             # Si estamos en el día siguiente y el inicio es después de medianoche
-            if inicio.time() < horario['hora_inicio']:
+            if inicio.time() < arranca:
                 hora_inicio_turno -= pd.Timedelta(days=1)
-        
+
         # Verificar si está dentro del horario laboral
         if hora_inicio_turno <= inicio <= hora_fin_turno:
             return 'Sí'
         else:
             return 'No'
     
-    def _split_midnight_crossings(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Divide registros que cruzan medianoche en dos registros separados.
-        Redistribuye la producción y duración proporcionalmente al tiempo trabajado en cada tramo.
-        
-        Args:
-            df: DataFrame con los registros originales
-            
-        Returns:
-            DataFrame con registros divididos donde cruzan medianoche
-        """
-        if df is None or df.empty:
-            return df
-        
-        # Guardar los tipos de datos originales
-        original_dtypes = df.dtypes.to_dict()
-        
-        # Lista para almacenar los nuevos registros
-        new_records = []
-        
-        for idx, row in df.iterrows():
-            inicio = row['Fecha_Hora_Inicio']
-            fin = row['Fecha_Hora_Termino']
-            
-            # Verificar si cruza medianoche (diferentes fechas)
-            if inicio.date() != fin.date():
-                # Calcular los puntos de corte
-                fin_dia_inicio = datetime.combine(inicio.date(), time(23, 59, 59))
-                inicio_dia_siguiente = datetime.combine(fin.date(), time(0, 0, 0))
-                
-                # Calcular duraciones en minutos
-                dur_total = (fin - inicio).total_seconds() / 60
-                dur_A = (fin_dia_inicio - inicio).total_seconds() / 60
-                dur_B = (fin - inicio_dia_siguiente).total_seconds() / 60
-                
-                # Producción original
-                prod_original = row['Q_prod_total'] if pd.notna(row['Q_prod_total']) else 0
-                
-                # Calcular producción proporcional
-                if dur_total > 0:
-                    prod_A_raw = prod_original * (dur_A / dur_total)
-                    prod_A = round(prod_A_raw, 2)  # Redondear a 2 decimales
-                    prod_B = round(prod_original - prod_A, 2)  # Garantizar suma exacta
-                else:
-                    prod_A = 0
-                    prod_B = 0
-                
-                # Crear registro A (mismo día hasta 23:59:59)
-                record_A = row.to_dict()
-                record_A['Fecha_Hora_Termino'] = fin_dia_inicio
-                record_A['Duracion(min)'] = round(dur_A, 2)
-                record_A['Q_prod_total'] = prod_A
-                record_A['Registro_Dividido'] = 'Parte_1'
-                new_records.append(record_A)
-                
-                # Crear registro B (día siguiente desde 00:00:00)
-                record_B = row.to_dict()
-                record_B['Fecha_Hora_Inicio'] = inicio_dia_siguiente
-                record_B['Fecha_Hora_Termino'] = fin
-                record_B['Duracion(min)'] = round(dur_B, 2)
-                record_B['Q_prod_total'] = prod_B
-                record_B['Registro_Dividido'] = 'Parte_2'
-                new_records.append(record_B)
-                
-            else:
-                # No cruza medianoche, mantener registro original
-                record = row.to_dict()
-                record['Registro_Dividido'] = 'No'
-                new_records.append(record)
-        
-        # Crear nuevo DataFrame con los registros procesados
-        result_df = pd.DataFrame(new_records)
-        
-        # Restaurar tipos de datos para columnas string
-        string_columns = ['Producto', 'Desc_detencion', 'Sku', 'Comentarios', 'Planta', 
-                          'Tipo_Unidad', 'Usuario', 'Maquina', 'Linea', 'Turno',
-                          'Cod_detencion_1', 'Cod_detencion_2', 'Cod_detencion_3', 
-                          'Cod_detencion_4', 'Cod_detencion_5', 'Cod_detencion_6']
-        
-        for col in string_columns:
-            if col in result_df.columns:
-                result_df[col] = result_df[col].astype(str).replace('nan', pd.NA)
-        
-        # Resetear índice
-        result_df = result_df.reset_index(drop=True)
-        
-        return result_df
     
     def save_processed_data(self, df: pd.DataFrame, line_name: str, year: str, month: str) -> str:
         """Guarda los datos procesados con la estructura año/mes y nuevo formato de nombre."""
@@ -490,14 +499,56 @@ class DataTransformer:
         df.to_csv(output_path, sep=";", index=False, encoding='utf-8-sig', decimal=',', date_format='%Y-%m-%d %H:%M:%S')
         return output_path
     
-    def process_line(self, line_name: str, year: str, pbar: tqdm = None) -> pd.DataFrame:
-        """Procesa todos los meses de una línea para un año específico y guarda archivos procesados."""
+    def _needs_processing(self, line_name: str, year: str, month: str) -> bool:
+        """Verifica si un archivo raw es más reciente que su procesado (para modo incremental)."""
+        # Buscar archivos raw
+        raw_dir = os.path.normpath(os.path.join(self.base_path, year, f"{int(month):02d}"))
+        if not os.path.exists(raw_dir):
+            return False
+
+        month_name = _get_month_name_spanish(int(month))
+        line_pattern = f"produccion_{year}_{month_name}_{line_name.lower()}"
+        raw_files = [os.path.join(raw_dir, f) for f in os.listdir(raw_dir)
+                     if f.endswith('.csv') and line_pattern in f.lower()]
+        if not raw_files:
+            return False
+
+        # Buscar archivo procesado correspondiente
+        processed_dir = os.path.join(self.processed_path, year, f"{int(month):02d}")
+        processed_file = os.path.join(processed_dir, f"processed_prod_{year}_{month_name}_{line_name.lower()}.csv")
+
+        if not os.path.exists(processed_file):
+            return True  # No existe procesado, hay que procesar
+
+        # Comparar timestamps: si algún raw es más reciente que el procesado, reprocesar
+        processed_mtime = os.path.getmtime(processed_file)
+        for raw_file in raw_files:
+            if os.path.getmtime(raw_file) > processed_mtime:
+                return True
+
+        return False
+
+    def process_line(self, line_name: str, year: str, pbar: tqdm = None, incremental: bool = False) -> pd.DataFrame:
+        """Procesa todos los meses de una línea para un año específico y guarda archivos procesados.
+        
+        Args:
+            line_name: Nombre de la línea a procesar.
+            year: Año a procesar.
+            pbar: Barra de progreso opcional.
+            incremental: Si True, solo procesa meses con datos raw más recientes que los procesados.
+        """
         processed_files = []
         
         for month in [f"{m:02d}" for m in range(1, 13)]:
             if pbar:
                 pbar.set_description(f"Procesando {line_name}-{month}")
             
+            # En modo incremental, saltar si no hay cambios
+            if incremental and not self._needs_processing(line_name, year, month):
+                if pbar:
+                    pbar.update(1)
+                continue
+
             monthly_df = self.read_line_data(line_name, year, month)
             
             if monthly_df is not None:
@@ -580,11 +631,52 @@ class DataTransformer:
         return output_path
 
 def main():
-    # Configuración
-    lines = ["TF_2","TF_3","TF_5","TF_6","TF_7","TF_8","TF_9","TF_10","EXT_14","EXT_15","EXT_16"]
-    
-    # Crear instancia del transformador (usa PATHS desde settings automáticamente)
-    transformer = DataTransformer()
+    parser = argparse.ArgumentParser(description="Transformer ETL Typack")
+    parser.add_argument(
+        "--incremental",
+        action="store_true",
+        help="Solo procesa archivos raw más recientes que sus procesados. Reduce tiempo de ejecución."
+    )
+    parser.add_argument(
+        "--test",
+        action="store_true",
+        help="Modo testing: guarda resultados en directorios separados (*_test) para validar reglas de negocio sin afectar producción."
+    )
+    parser.add_argument("--input", required=False, help="Directorio raw de entrada (default: PATH_RAW)")
+    parser.add_argument("--processed", required=False, help="Directorio de salida procesada (default: PATH_PROCESSED)")
+    parser.add_argument("--consolidated", required=False, help="Directorio del consolidado (default: PATH_CONSOLIDATED)")
+    args = parser.parse_args()
+
+    # Las tres rutas son parametrizables: apuntar sólo la entrada dejaba las
+    # salidas en producción, que es como se sobrescriben datos reales sin querer.
+    if args.input and not (args.processed and args.consolidated):
+        parser.error("--input requiere también --processed y --consolidated, "
+                     "para no escribir las salidas en producción.")
+
+    # Una sola fuente para la lista de líneas: config/lineas.json. Antes estaba
+    # duplicada acá, así que dar de alta una línea requería dos ediciones.
+    lines = [linea["name"] for linea in load_lineas()]
+
+    transformer = DataTransformer(
+        base_path=args.input,
+        test_mode=args.test,
+        processed_path=args.processed,
+        consolidated_path=args.consolidated,
+    )
+    print(f"Entrada    : {transformer.base_path}")
+    print(f"Procesados : {transformer.processed_path}")
+    print(f"Consolidado: {transformer.consolidated_path}\n")
+
+    mode_label = []
+    if args.incremental:
+        mode_label.append("INCREMENTAL")
+    if args.test:
+        mode_label.append("TEST")
+    if mode_label:
+        print(f"Modo: {' + '.join(mode_label)}")
+        if args.test:
+            print(f"  Salida procesados: {transformer.processed_path}")
+            print(f"  Salida consolidado: {transformer.consolidated_path}")
     
     # Detectar todos los años disponibles en el directorio raw
     available_years = []
@@ -615,7 +707,7 @@ def main():
             
             # Procesar cada línea para este año
             for line in lines:
-                transformer.process_line(line, year, pbar)
+                transformer.process_line(line, year, pbar, incremental=args.incremental)
     
     # Consolidar todos los archivos procesados de todos los años en un solo archivo
     print(f"\n{'='*60}")

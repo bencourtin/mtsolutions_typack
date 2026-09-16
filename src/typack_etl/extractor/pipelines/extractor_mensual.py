@@ -1,197 +1,106 @@
 """
+Extractor del reporte "sabana" por mes calendario. SÓLO RECARGAS HISTÓRICAS.
+
+Este pipeline ya no forma parte del ETL diario: su ventana es el mes
+calendario, por lo que no captura las reasignaciones de detenciones que
+ocurren después del cierre de mes (una detención del día 28 reclasificada el 5
+del mes siguiente nunca se vuelve a consultar). El ETL diario usa
+`extractor_30m.py`, con ventana móvil.
+
+Úselo para recargar un mes completo de forma puntual, indicando siempre
+--start-date y --end-date. Reescribe el archivo del mes completo, sin
+conservar lo previo: no lo ejecute sobre un mes que la ventana móvil esté
+refrescando en paralelo.
+
 Parámetros:
 	--start-date  Fecha/hora inicio (cadena que acepta la API). Si no se indica, se usa el 1er día del mes en curso a las 00:00.
 	--end-date    Fecha/hora fin (cadena que acepta la API).    Si no se indica, se usa el último día del mes en curso a las 23:59:59.
 	--devid       (Opcional) Identificador de la línea/máquina para filtrar. Si se omite se descargan todas las líneas definidas en config/lineas.json.
-  --output      (Opcional) Ruta del CSV de salida. Por defecto, data/processed/...
-  --logs-dir    (Opcional) Directorio donde se guardarán plan_*.csv y results_*.csv (default: data/processed/logs)
-  --no-progress (Flag) Si se incluye, no muestra barra de progreso en modo multi-línea
+	--output      (Opcional) Ruta del CSV de salida. Por defecto, <PATH_RAW>/<año>/<mes>/
+	--logs-dir    (Opcional) Directorio donde se guardarán plan_*.csv y results_*.csv (default: <PATH_LOGS>/<año>/<mes>)
+	--no-progress (Flag) Si se incluye, no muestra barra de progreso en modo multi-línea
 
 Salida:
-  CSV con las filas retornadas por el endpoint. Si no hay datos, el archivo
-  contendrá sólo cabeceras (si es posible inferirlas) o se omitirá la creación
-  según el caso.
+	CSV con las filas retornadas por el endpoint, con el esquema canónico de
+	`functions.io.SABANA_COLUMNS`. Si no hay datos, el archivo se genera
+	igualmente con la cabecera.
 """
 
 from __future__ import annotations
 
 import argparse
-import csv
-import os
+from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Iterable, List, Mapping, Sequence
-import calendar
-from datetime import datetime
-import time
+from typing import Iterable
 
+from typack_etl.extractor.functions.io import (
+	infer_rows,
+	progress,
+	run_stamp,
+	safe_filename,
+	write_plan_log,
+	write_results_log,
+	write_window_csv,
+)
 from typack_etl.extractor.services.auth import get_token
 from typack_etl.extractor.services.reports import get_sabana_report
+from typack_etl.extractor.utils.date_utils import (
+	a_planta,
+	a_utc,
+	fmt_api,
+	inicio_mes_operativo,
+	mes_operativo,
+	month_name_es,
+	now_planta,
+	parse_api_datetime,
+)
 from config.settings import PATHS, load_lineas
 
 
-def _infer_rows(data) -> List[Mapping]:
-	"""Normaliza la respuesta a una lista de mapeos (dicts por fila).
-
-	Acepta:
-	  - lista de dicts -> se retorna tal cual
-	  - dict con clave 'data' o 'results' que contenga lista -> retorna esa lista
-	  - dict simple -> lo envuelve en una lista
-	  - cualquier otro -> retorna lista vacía
-	"""
-	if isinstance(data, list):
-		return [x for x in data if isinstance(x, dict)]
-	if isinstance(data, dict):
-		for key in ("data", "results", "items", "rows"):
-			if key in data and isinstance(data[key], list):
-				return [x for x in data[key] if isinstance(x, dict)]
-		return [data]
-	return []
-
-
-def _union_fieldnames(rows: Sequence[Mapping]) -> List[str]:
-	keys = []
-	seen = set()
-	for r in rows:
-		for k in r.keys():
-			if k not in seen:
-				seen.add(k)
-				keys.append(k)
-	return keys
-
-
-def _safe_filename(text: str) -> str:
-	return "".join(c if c.isalnum() or c in ("-", "_", ".") else "_" for c in text)
-
-
-def _format_value(value):
-	"""Convierte valores numéricos a formato de cadena con coma decimal.
-
-	Reglas:
-	  - float -> reemplaza punto por coma
-	  - int -> str normal
-	  - str que representa un número decimal (ej: 12.34) -> reemplaza punto por coma
-	  - otros tipos -> se devuelve tal cual
-	"""
-	if isinstance(value, float):
-		# Usar representación estándar y reemplazar punto
-		return ("%s" % value).replace(".", ",")
-	if isinstance(value, int):
-		return str(value)
-	if isinstance(value, str):
-		# Detectar patrón decimal simple
-		if value.replace("-", "").replace(".", "", 1).isdigit() and "." in value:
-			return value.replace(".", ",")
-		return value
-	return value
-
-
 def _current_month_range_strings() -> tuple[str, str]:
-		"""Devuelve (start_str, end_str) para el mes en curso.
+	"""Devuelve (start_str, end_str) en UTC para el mes operativo en curso.
 
-		Formato:
-			- start: YYYY-MM-01 00:00
-			- end:   YYYY-MM-<last> 23:59:59
-		"""
-		now = datetime.now()
-		year, month = now.year, now.month
-		last_day = calendar.monthrange(year, month)[1]
-		start = f"{year:04d}-{month:02d}-01 00:00"
-		end = f"{year:04d}-{month:02d}-{last_day:02d} 23:59:59"
-		return start, end
-
-
-def write_csv(rows: Sequence[Mapping], output_path: Path) -> int:
-	output_path.parent.mkdir(parents=True, exist_ok=True)
-	if not rows:
-		# Crear CSV vacío con cabeceras si no hay filas: no conocemos cabeceras, así que omitimos.
-		# En su lugar, creamos un archivo con solo BOM + sin filas ni cabeceras para indicar "sin datos".
-		with output_path.open("w", encoding="utf-8-sig", newline="") as f:
-			pass
-		return 0
-
-	fieldnames = _union_fieldnames(rows)
-	with output_path.open("w", encoding="utf-8-sig", newline="") as f:
-		writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore", delimiter=";")
-		writer.writeheader()
-		for r in rows:
-			# Formatear cada valor según reglas de coma decimal
-			formatted = {k: _format_value(r.get(k)) for k in fieldnames}
-			writer.writerow(formatted)
-	return len(rows)
-
-
-
-
-
-def _get_month_name_spanish(month_num: int) -> str:
-	"""Convierte número de mes (1-12) a nombre en español."""
-	month_names = {
-		1: "enero", 2: "febrero", 3: "marzo", 4: "abril",
-		5: "mayo", 6: "junio", 7: "julio", 8: "agosto",
-		9: "septiembre", 10: "octubre", 11: "noviembre", 12: "diciembre"
-	}
-	return month_names.get(month_num, str(month_num))
+	El mes operativo va del día 1 en el corte al día 1 del mes siguiente en el
+	corte, no de medianoche a medianoche. Cada borde usa el corte de su propia
+	fecha: un mes que contiene un cambio de hora no empieza y termina a la
+	misma hora UTC.
+	"""
+	year, month = mes_operativo(now_planta())
+	siguiente = (year + 1, 1) if month == 12 else (year, month + 1)
+	start = a_utc(inicio_mes_operativo(year, month))
+	end = a_utc(inicio_mes_operativo(*siguiente))
+	return fmt_api(start), fmt_api(end)
 
 
 def _parse_date_components(date_str: str) -> tuple[int, int, str]:
-	"""Extrae año, mes numérico y nombre de mes desde fecha YYYY-MM-DD."""
-	try:
-		date_part = date_str.split(" ")[0]  # Tomar solo la parte de fecha
-		year, month, _ = date_part.split("-")
-		year_int = int(year)
-		month_int = int(month)
-		month_name = _get_month_name_spanish(month_int)
-		return year_int, month_int, month_name
-	except Exception:
-		# Fallback a fecha actual si no se puede parsear
-		now = datetime.now()
-		return now.year, now.month, _get_month_name_spanish(now.month)
+	"""Extrae año, mes y nombre de mes operativo desde el inicio de la ventana."""
+	parsed = parse_api_datetime(date_str)
+	planta = a_planta(parsed) if parsed is not None else now_planta()
+	year, month = mes_operativo(planta)
+	return year, month, month_name_es(month)
 
 
-def _timestamp() -> str:
-	return datetime.now().strftime("%Y%m%d_%H%M%S")
+def _window_bounds(start: str, end: str) -> tuple[datetime, datetime]:
+	"""Ventana en el reloj de planta, para reemplazar sólo el tramo declarado.
 
-
-def _ensure_logs_dir(logs_dir: Path) -> None:
-	logs_dir.mkdir(parents=True, exist_ok=True)
-
-
-def _write_plan_log(items: list[dict], logs_dir: Path) -> Path:
-	"""Escribe plan_<ts>.csv con columnas line;devid;start;end;output_path."""
-	_ensure_logs_dir(logs_dir)
-	path = logs_dir / f"plan_{_timestamp()}.csv"
-	with path.open("w", encoding="utf-8") as f:
-		f.write("line;devid;start;end;output_path\n")
-		for it in items:
-			f.write(f"{it['line']};{it['devid']};{it['start']};{it['end']};{it['output_path']}\n")
-	return path
-
-
-def _write_results_log(items: list[dict], logs_dir: Path) -> Path:
-	"""Escribe results_<ts>.csv con columnas line;devid;start;end;rows;success;error."""
-	_ensure_logs_dir(logs_dir)
-	path = logs_dir / f"results_{_timestamp()}.csv"
-	with path.open("w", encoding="utf-8") as f:
-		f.write("line;devid;start;end;rows;success;error\n")
-		for it in items:
-			f.write(f"{it['line']};{it['devid']};{it['start']};{it['end']};{it['rows']};{int(it['success'])};{it['error']}\n")
-	return path
-
-
-def _progress(iterable, total: int, enabled: bool = True):
-	"""Barra de progreso simple sin dependencias externas."""
-	if not enabled:
-		for x in iterable:
-			yield x
-		return
-	bar_len = 30
-	for i, x in enumerate(iterable, 1):
-		pct = i / total
-		filled = int(bar_len * pct)
-		bar = "█" * filled + "·" * (bar_len - filled)
-		print(f"\r[{bar}] {i}/{total} ({pct*100:5.1f}%)", end="", flush=True)
-		yield x
-	print()  # salto final
+	`start` y `end` son las cadenas que recibe la API, o sea UTC; se convierten
+	al espacio de los timestamps que la API devuelve.
+	"""
+	start_utc = parse_api_datetime(start)
+	end_utc = parse_api_datetime(end)
+	if start_utc is None or end_utc is None:
+		raise SystemExit(
+			f"Rango no interpretable (start={start!r}, end={end!r}); use 'YYYY-MM-DD HH:MM:SS'."
+		)
+	if start_utc > end_utc:
+		raise SystemExit(f"Rango inválido: start={start} es posterior a end={end}")
+	start_dt, end_dt = a_planta(start_utc), a_planta(end_utc)
+	if mes_operativo(start_dt) != mes_operativo(end_dt - timedelta(seconds=1)):
+		print(
+			"Aviso: el rango cruza meses operativos. Este pipeline escribe una sola partición "
+			f"({'-'.join(str(x) for x in mes_operativo(start_dt))}); para ventanas que cruzan meses use extractor_30m."
+		)
+	return start_dt, end_dt
 
 
 def parse_args(argv: Iterable[str] | None = None):
@@ -212,13 +121,12 @@ def parse_args(argv: Iterable[str] | None = None):
 	parser.add_argument(
 		"--output",
 		required=False,
-		help="Ruta del CSV de salida. Por defecto data/processed/sabana_...csv",
+		help="Ruta del CSV de salida. Por defecto <PATH_RAW>/<año>/<mes>/",
 	)
 	parser.add_argument(
 		"--logs-dir",
 		required=False,
-		default="data/processed/logs",
-		help="Directorio de logs para plan y resultados (default: data/processed/logs)",
+		help="Directorio de logs para plan y resultados (default: <PATH_LOGS>/<año>/<mes>)",
 	)
 	parser.add_argument(
 		"--no-progress",
@@ -236,25 +144,27 @@ def main(argv: Iterable[str] | None = None) -> int:
 		auto_start, auto_end = _current_month_range_strings()
 		start = args.start_date or auto_start
 		end = args.end_date or auto_end
-		if not args.start_date or not args.end_date:
-			print(f"Usando rango por defecto del mes actual: start={start} end={end}")
+		print(f"Usando rango por defecto del mes actual: start={start} end={end}")
 	else:
 		start = args.start_date
 		end = args.end_date
 	devid = args.devid
+	window_start, window_end = _window_bounds(start, end)
 
 	# Cargar configuración para obtener rutas
-	raw_path = PATHS.get("raw", "data/processed")
-	logs_base_path = PATHS.get("logs", "data/processed/logs")
-	
+	raw_path = PATHS.get("raw", "data/raw")
+	logs_base_path = PATHS.get("logs", "logs")
+
 	# Extraer componentes de fecha para estructura de carpetas
 	year, month_num, month_name = _parse_date_components(start)
 
 	# Configurar directorio de logs con estructura año/mes
-	if args.logs_dir == "data/processed/logs":  # Solo si se usa el default
-		logs_dir = Path(logs_base_path) / str(year) / f"{month_num:02d}"
-	else:
+	if args.logs_dir:
 		logs_dir = Path(args.logs_dir)
+	else:
+		logs_dir = Path(logs_base_path) / str(year) / f"{month_num:02d}"
+
+	stamp = run_stamp()
 
 	print("Obteniendo token...")
 	token = get_token()
@@ -266,7 +176,7 @@ def main(argv: Iterable[str] | None = None) -> int:
 			out_path = Path(args.output)
 		else:
 			base_dir = Path(raw_path) / str(year) / f"{month_num:02d}"
-			out_name = f"produccion_{year}_{month_name}_{_safe_filename(devid)}.csv"
+			out_name = f"produccion_{year}_{month_name}_{safe_filename(devid)}.csv"
 			out_path = base_dir / out_name
 
 		# Plan y logs para single-line
@@ -277,14 +187,15 @@ def main(argv: Iterable[str] | None = None) -> int:
 			"end": end,
 			"output_path": str(out_path)
 		}]
-		plan_log = _write_plan_log(plan_items, logs_dir)
+		plan_log = write_plan_log(plan_items, logs_dir, stamp)
 		print(f"Plan registrado: {plan_log}")
 
 		print(f"Consultando sabana: start={start} end={end} devid={devid} ...")
 		data = get_sabana_report(token, start, end, devid)
-		rows = _infer_rows(data)
-		count = write_csv(rows, out_path)
-		print(f"Guardado CSV: {out_path} ({count} filas)")
+		rows = infer_rows(data)
+		stats = write_window_csv(rows, out_path, window_start, window_end)
+		count = stats["nuevas"]
+		print(f"Guardado CSV: {out_path} ({count} filas nuevas, {stats['conservadas']} conservadas fuera del rango)")
 		results_items = [{
 			"line": devid,
 			"devid": devid,
@@ -292,9 +203,10 @@ def main(argv: Iterable[str] | None = None) -> int:
 			"end": end,
 			"rows": count,
 			"success": count > 0,
-			"error": "" if count > 0 else "SIN_DATOS"
+			"error": "" if count > 0 else "SIN_DATOS",
+			"detalle": f"{year}-{month_num:02d}:{count}(+{stats['conservadas']} conservadas)",
 		}]
-		results_log = _write_results_log(results_items, logs_dir)
+		results_log = write_results_log(results_items, logs_dir, stamp)
 		print(f"Resultados registrados: {results_log}")
 		if count == 0:
 			print("Advertencia: no se recibieron filas para los parámetros indicados.")
@@ -320,34 +232,34 @@ def main(argv: Iterable[str] | None = None) -> int:
 
 	print(f"Procesando {len(lineas)} líneas definidas en config/lineas.json ...")
 
+	def _out_path(line_name: str) -> Path:
+		return base_dir / f"produccion_{year}_{month_name}_{safe_filename(line_name)}.csv"
+
 	# Construir plan previo
 	plan_items = []
 	for linea in lineas:
 		ldev = linea.get("devid")
 		lname = linea.get("name", ldev)
-		out_name = f"produccion_{year}_{month_name}_{_safe_filename(lname)}.csv"
-		out_path = base_dir / out_name
 		plan_items.append({
 			"line": lname,
 			"devid": ldev,
 			"start": start,
 			"end": end,
-			"output_path": str(out_path)
+			"output_path": str(_out_path(lname))
 		})
-	plan_log = _write_plan_log(plan_items, logs_dir)
+	plan_log = write_plan_log(plan_items, logs_dir, stamp)
 	print(f"Plan registrado: {plan_log}")
 
 	results_items = []
 	global_count = 0
-	for linea in _progress(lineas, len(lineas), enabled=not args.no_progress):
+	for linea in progress(lineas, len(lineas), enabled=not args.no_progress):
 		ldev = linea.get("devid")
 		lname = linea.get("name", ldev)
 		try:
 			data = get_sabana_report(token, start, end, ldev)
-			rows = _infer_rows(data)
-			out_name = f"produccion_{year}_{month_name}_{_safe_filename(lname)}.csv"
-			out_path = base_dir / out_name
-			count = write_csv(rows, out_path)
+			rows = infer_rows(data)
+			stats = write_window_csv(rows, _out_path(lname), window_start, window_end)
+			count = stats["nuevas"]
 			global_count += count
 			results_items.append({
 				"line": lname,
@@ -356,7 +268,8 @@ def main(argv: Iterable[str] | None = None) -> int:
 				"end": end,
 				"rows": count,
 				"success": count > 0,
-				"error": "" if count > 0 else "SIN_DATOS"
+				"error": "" if count > 0 else "SIN_DATOS",
+				"detalle": f"{year}-{month_num:02d}:{count}(+{stats['conservadas']} conservadas)",
 			})
 		except Exception as e:  # noqa: BLE001
 			results_items.append({
@@ -366,10 +279,10 @@ def main(argv: Iterable[str] | None = None) -> int:
 				"end": end,
 				"rows": 0,
 				"success": False,
-				"error": str(e).replace(";", ",")
+				"error": str(e)
 			})
 
-	results_log = _write_results_log(results_items, logs_dir)
+	results_log = write_results_log(results_items, logs_dir, stamp)
 	print(f"Resultados registrados: {results_log}")
 	print(f"Finalizado. Total filas acumuladas: {global_count}")
 	faltan = [r for r in results_items if not r["success"]]
@@ -386,4 +299,3 @@ if __name__ == "__main__":  # pragma: no cover
 	except KeyboardInterrupt:
 		print("Interrumpido por el usuario.")
 		raise SystemExit(130)
-	

@@ -106,37 +106,58 @@ python scripts/run_daily_etl.py
 ```
 
 Este comando:
-1. Ejecuta el **extractor mensual** para todas las líneas del mes en curso
-2. Ejecuta el **transformer** que procesa, normaliza y consolida los datos
-3. Envía email de alerta si algún paso falla
+1. Ejecuta el **extractor de ventana móvil** (`extractor_30m`), que re-consulta
+   los últimos 35 días operativos de todas las líneas — así una detención
+   reclasificada después del cierre de mes se vuelve a extraer
+2. Ejecuta el **transformer**, que procesa, normaliza y consolida
+3. Publica las tablas de auditoría junto al consolidado, si la transformación
+   terminó bien
+4. Envía email de alerta si algún paso falla
+
+Toma un lock para que dos corridas no se pisen: si ya hay una en curso, sale con
+código 2 sin hacer nada.
+
+### Extractor ventana móvil (el del ETL diario)
+
+```bash
+# Ventana por defecto (35 días), todas las líneas
+python -m src.typack_etl.extractor.pipelines.extractor_30m
+
+# Últimos 7 días
+python -m src.typack_etl.extractor.pipelines.extractor_30m --days 7
+
+# Una línea, rango a medida (en UTC)
+python -m src.typack_etl.extractor.pipelines.extractor_30m --devid 1273 \
+    --start-date "2026-03-01 12:00:00" --end-date "2026-04-01 12:00:00"
+```
 
 ### Extractor mensual
 
-```bash
-# Todas las líneas, mes actual
-python -m typack_etl.extractor.pipelines.extractor_mensual
-
-# Línea específica
-python -m typack_etl.extractor.pipelines.extractor_mensual --devid 1268
-
-# Rango de fechas personalizado
-python -m typack_etl.extractor.pipelines.extractor_mensual --start-date "2026-03-01 00:00" --end-date "2026-03-31 23:59:59"
-```
-
-### Extractor ventana móvil (30 días)
+Sólo para recargas puntuales. **No estampa las columnas de trazabilidad ni
+audita**, así que no sirve para reconstruir la base: para eso está
+`scripts/recarga_historica.py`.
 
 ```bash
-# Últimos 30 días, todas las líneas
-python -m typack_etl.extractor.pipelines.extractor_30m
-
-# Últimos 7 días
-python -m typack_etl.extractor.pipelines.extractor_30m --days 7
+python -m src.typack_etl.extractor.pipelines.extractor_mensual --devid 1268
 ```
+
+### Recarga histórica
+
+```bash
+# Ver el plan sin tocar nada
+python scripts/recarga_historica.py --dry-run
+
+# Reconstruir el rango completo con el esquema auditable
+python scripts/recarga_historica.py
+```
+
+Ver [docs/PRODUCTION_SETUP.md](docs/PRODUCTION_SETUP.md) §7 antes de correrla:
+el destino tiene que estar vacío o la trazabilidad sale mal.
 
 ### Transformer
 
 ```bash
-python -m typack_etl.transformer.transformer
+python -m src.typack_etl.transformer.transformer
 ```
 
 Procesa todos los años disponibles en `PATH_RAW`, aplica transformaciones y genera:
@@ -169,14 +190,19 @@ El transformer aplica las siguientes operaciones sobre los datos crudos:
 
 ## Automatización (Windows Task Scheduler)
 
-### ETL diario
-Ejecutar `scripts/run_daily_etl.bat` como tarea programada. El script valida Python, ejecuta el ETL y registra resultados en logs.
+Las definiciones de tarea importables están en [`deploy/`](deploy/README.md):
+la diaria a las 06:00 (`scripts/run_daily_etl.bat`) y la semanal los lunes a las
+09:00 (`scripts/run_weekly_report.bat`). Se importan con `schtasks /create /xml`
+tras reemplazar dos marcadores.
 
-### Reporte semanal
-Ejecutar `scripts/run_weekly_report.bat` los lunes a las 9:00. Genera y envía un reporte con métricas de la semana (tasa de éxito, filas extraídas/transformadas, líneas sin datos).
+El procedimiento completo de instalación del servidor —incluido por qué Google
+Drive tiene que estar en modo Reflejar— está en
+[docs/PRODUCTION_SETUP.md](docs/PRODUCTION_SETUP.md).
 
 ## Documentación adicional
 
+- [docs/ARQUITECTURA_ETL.md](docs/ARQUITECTURA_ETL.md) — Cómo funciona el proceso y por qué
 - [docs/EXTRACTOR_USAGE.md](docs/EXTRACTOR_USAGE.md) — Uso detallado del extractor
 - [docs/TRANSFORMER_CONFIG.md](docs/TRANSFORMER_CONFIG.md) — Configuración del transformer
 - [docs/PRODUCTION_SETUP.md](docs/PRODUCTION_SETUP.md) — Despliegue en producción
+- [deploy/README.md](deploy/README.md) — Tareas programadas

@@ -7,7 +7,7 @@ from config.settings import API_USER, API_PASS
 # URL base de la API
 BASE_URL = "https://mts2.mtsolutions.io/api"
 
-def _create_session(retries=3, backoff_factor=0.5, status_forcelist=(500, 502, 503, 504)):
+def _create_session(retries=3, backoff_factor=0.5, status_forcelist=(429, 500, 502, 503, 504)):
     """
     Crea una sesión de requests con politica de reintentos para resiliencia en fallos temporales.
     """
@@ -17,8 +17,10 @@ def _create_session(retries=3, backoff_factor=0.5, status_forcelist=(500, 502, 5
         backoff_factor=backoff_factor,
         status_forcelist=status_forcelist,  # códigos HTTP que se deben reintentar
         allowed_methods=["POST"],  # método que usaremos aquí
+        respect_retry_after_header=True,
         raise_on_status=False,
     )
+    
     adapter = HTTPAdapter(max_retries=retry)
     session.mount("https://", adapter)
     session.mount("http://", adapter)

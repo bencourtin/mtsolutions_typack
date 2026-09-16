@@ -232,7 +232,36 @@ def send_weekly_report(stats: Dict) -> bool:
         lines_no_data_html += "</table>"
     else:
         lines_no_data_html = "<p> Todas las líneas tuvieron datos esta semana.</p>"
-    
+
+    # Construir bloque de reasignaciones.
+    # Es la pregunta que el reporte no respondía: la API entrega el estado
+    # actual de la sábana, así que una detención puede cambiar de código días
+    # después del evento y hasta ahora eso no llegaba a nadie.
+    reasignaciones = stats.get("reasignaciones")
+    if reasignaciones is None:
+        reasignaciones_html = ""  # no se pudo leer el libro
+    elif reasignaciones.get("total"):
+        filas_lineas = "".join(
+            f"<tr><td>{linea}</td><td>{cantidad}</td></tr>"
+            for linea, cantidad in list(reasignaciones.get("por_linea", {}).items())[:10]
+        )
+        retraso = reasignaciones.get("retraso_mediano")
+        retraso_txt = f"{retraso} días" if retraso is not None else "sin dato"
+        reasignaciones_html = f"""
+        <h3>🔁 Detenciones reasignadas esta semana: {reasignaciones['total']}</h3>
+        <p>Retraso mediano entre el evento y su reasignación: <strong>{retraso_txt}</strong>
+           (máximo: {reasignaciones.get('retraso_max', 'sin dato')} días).</p>
+        <table border="1" cellpadding="8" cellspacing="0" style="border-collapse: collapse;">
+            <tr style="background-color: #ede7f6;">
+                <th>Línea</th>
+                <th>Reasignaciones</th>
+            </tr>
+            {filas_lineas}
+        </table>
+        """
+    else:
+        reasignaciones_html = "<p> Ninguna detención cambió de código esta semana.</p>"
+
     # Construir lista de errores
     errors_html = ""
     if errors_list:
@@ -344,7 +373,9 @@ def send_weekly_report(stats: Dict) -> bool:
             </table>
             
             {lines_no_data_html}
-            
+
+            {reasignaciones_html}
+
             {errors_html}
             
             <hr>

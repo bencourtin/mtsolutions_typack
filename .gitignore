@@ -26,7 +26,8 @@ notebooks/
 notebooks/*
 
 # ===== Tests y resultados de pruebas =====
-tests/
+# La suite SI se versiona: es como se verifica el despliegue en el servidor.
+# Antes estaba ignorada y un clone se quedaba sin los 295 tests.
 
 # ===== LOGS Y ARCHIVOS DE SEGUIMIENTO =====
 # Excluir logs y archivos temporales
@@ -139,6 +140,8 @@ coverage.xml
 *.bat
 *.cmd
 *.exe
+# ...salvo los lanzadores de las tareas programadas, que el servidor necesita.
+!scripts/*.bat
 
 # ===== DOCKER Y CONTENEDORES =====
 # Mantener Dockerfiles pero excluir archivos temporales

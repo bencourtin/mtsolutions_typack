@@ -1,14 +1,181 @@
 {
-    "Termoformado_dia": {
-        "Turno": "TD",
-        "Linea": "Termoformado",
-        "hora_inicio": "08:00",
-        "hora_fin": "18:00"
+  "version": "2.0",
+  "turnos": {
+    "TD": {
+      "nombre": "Día"
     },
-    "Termoformado_noche": {
-        "Turno": "TN",
-        "Linea": "Termoformado",
-        "hora_inicio": "22:00",
-        "hora_fin": "08:00"
+    "TT": {
+      "nombre": "Tarde"
+    },
+    "TN": {
+      "nombre": "Noche"
     }
+  },
+  "areas": {
+    "Termoformado": {
+      "turnos_permitidos": [
+        "TD",
+        "TN"
+      ]
+    },
+    "Extrusion": {
+      "turnos_permitidos": [
+        "TD",
+        "TT",
+        "TN"
+      ]
+    }
+  },
+  "vigencias": [
+    {
+      "id": "2026-04-invierno",
+      "temporada": "invierno",
+      "vigencia_desde": "2026-04-01",
+      "vigente": true,
+      "comentario": "Nueva jornada laboral 42 horas",
+      "horarios": {
+        "TD": {
+          "lunes": {
+            "inicio": "08:00",
+            "fin": "18:00"
+          },
+          "martes": {
+            "inicio": "08:00",
+            "fin": "18:00"
+          },
+          "miercoles": {
+            "inicio": "08:00",
+            "fin": "18:00"
+          },
+          "jueves": {
+            "inicio": "08:00",
+            "fin": "18:00"
+          },
+          "viernes": {
+            "inicio": "08:00",
+            "fin": "15:00"
+          }
+        },
+        "TT": {
+          "lunes": {
+            "inicio": "14:30",
+            "fin": "23:00"
+          },
+          "martes": {
+            "inicio": "13:00",
+            "fin": "23:00"
+          },
+          "miercoles": {
+            "inicio": "13:00",
+            "fin": "23:00"
+          },
+          "jueves": {
+            "inicio": "13:00",
+            "fin": "23:00"
+          },
+          "viernes": {
+            "inicio": "13:00",
+            "fin": "21:30"
+          }
+        },
+        "TN": {
+          "lunes": {
+            "inicio": "23:00",
+            "fin": "08:00"
+          },
+          "martes": {
+            "inicio": "23:00",
+            "fin": "08:00"
+          },
+          "miercoles": {
+            "inicio": "23:00",
+            "fin": "08:00"
+          },
+          "jueves": {
+            "inicio": "23:00",
+            "fin": "08:00"
+          },
+          "viernes": {
+            "inicio": "21:30",
+            "fin": "08:30"
+          }
+        }
+      }
+    },
+    {
+      "id": "2026-09-verano",
+      "temporada": "verano",
+      "vigencia_desde": "2026-09-01",
+      "vigente": true,
+      "comentario": "Nueva jornada laboral 42 horas",
+      "horarios": {
+        "TD": {
+          "lunes": {
+            "inicio": "08:00",
+            "fin": "18:00"
+          },
+          "martes": {
+            "inicio": "08:00",
+            "fin": "18:00"
+          },
+          "miercoles": {
+            "inicio": "08:00",
+            "fin": "18:00"
+          },
+          "jueves": {
+            "inicio": "08:00",
+            "fin": "18:00"
+          },
+          "viernes": {
+            "inicio": "08:00",
+            "fin": "15:00"
+          }
+        },
+        "TT": {
+          "lunes": {
+            "inicio": "13:00",
+            "fin": "23:00"
+          },
+          "martes": {
+            "inicio": "13:00",
+            "fin": "23:00"
+          },
+          "miercoles": {
+            "inicio": "13:00",
+            "fin": "23:00"
+          },
+          "jueves": {
+            "inicio": "13:00",
+            "fin": "23:00"
+          },
+          "viernes": {
+            "inicio": "13:00",
+            "fin": "20:00"
+          }
+        },
+        "TN": {
+          "lunes": {
+            "inicio": "23:00",
+            "fin": "08:00"
+          },
+          "martes": {
+            "inicio": "23:00",
+            "fin": "08:00"
+          },
+          "miercoles": {
+            "inicio": "23:00",
+            "fin": "08:00"
+          },
+          "jueves": {
+            "inicio": "23:00",
+            "fin": "08:00"
+          },
+          "viernes": {
+            "inicio": "20:00",
+            "fin": "07:00"
+          }
+        }
+      }
+    }
+  ]
 }
