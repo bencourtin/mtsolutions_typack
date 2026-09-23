@@ -8,7 +8,7 @@ from tqdm import tqdm
 
 from config.settings import PATHS, load_horarios, load_lineas
 from typack_etl.extractor.utils.date_utils import CORTE_LOCAL, a_local
-from typack_etl.transformer.turnos import Caso, Horarios, sin_horas_extra
+from typack_etl.transformer.turnos import TNL, Caso, Horarios
 
 
 def _a_hora_local(serie: pd.Series) -> pd.Series:
@@ -115,8 +115,9 @@ class DataTransformer:
                              'Tipo_Unidad', 'Usuario', 'Maquina', 'Linea', 'Turno',
                              'Cod_detencion_1', 'Cod_detencion_2', 'Cod_detencion_3',
                              'Cod_detencion_4', 'Cod_detencion_5', 'Cod_detencion_6']
-        self.column_order = ['Año', 'Mes', 'Dia_Operativo', 'Fecha_Hora_Inicio', 'Fecha_Hora_Termino', 'Planta',
-                           'Linea', 'Maquina', 'Turno', 'OF', 'Usuario', 'Producto', 'Sku', 'Tipo_Unidad',
+        self.column_order = ['Año', 'Mes', 'Dia_Operativo', 'Fecha_Inicio_Turno', 'Fecha_Hora_Inicio',
+                           'Fecha_Hora_Termino', 'Planta',
+                           'Linea', 'Maquina', 'Turno', 'Turno_Origen', 'OF', 'Usuario', 'Producto', 'Sku', 'Tipo_Unidad',
                            'Q_prod_total', 'Duracion(min)', 'Cod_detencion_1', 'Cod_detencion_2',
                            'Cod_detencion_3', 'Cod_detencion_4', 'Cod_detencion_5', 'Cod_detencion_6',
                            'Desc_detencion', 'Comentarios',
@@ -246,20 +247,15 @@ class DataTransformer:
         df['Fecha_Hora_Inicio'] = _a_hora_local(df['Fecha_Hora_Inicio'])
         df['Fecha_Hora_Termino'] = _a_hora_local(df['Fecha_Hora_Termino'])
 
-        # El turno sale de la hora de inicio, ya en hora local. Sólo se calcula
-        # donde el origen no sabe (T0, '-', vacío); un turno que ya vino del
-        # proveedor se respeta, salvo en el hueco 18:00-23:00 de Termoformado.
-        # Ver `transformer.turnos` para las tres reglas y por qué no viven en
-        # el JSON.
-        clasificado = [
-            self.horarios.clasificar(linea, turno, inicio)
-            for linea, turno, inicio in zip(df['Linea'], df['Turno'], df['Fecha_Hora_Inicio'])
-        ]
-        df['Turno'] = [c[0] for c in clasificado]
-        # `_caso_turno` es de trabajo: dice de dónde salió el turno, lo usa el
-        # cálculo de horas extra y se descarta antes de guardar.
-        df['_caso_turno'] = [c[1] for c in clasificado]
-        self._avisar_turnos_sin_resolver(df)
+        # Fragmentar cada fila en un tramo por cada turno que su intervalo
+        # cruza: TD/TT/TN cuando cae dentro de una franja de horarios.json, o
+        # TNL cuando no (fin de semana, el hueco entre turnos, o un feriado
+        # marcado en `Comentarios`, que pisa cualquier turno ya declarado).
+        # Ver `typack_etl.transformer.turnos.Horarios.tramos`. Tiene que
+        # pasar antes de Año/Mes/Dia_Operativo: cada tramo nuevo tiene su
+        # propia fecha de inicio (`Fecha_Inicio_Turno`), y el mes operativo se
+        # calcula sobre esa fecha, no sobre la del registro original.
+        df = self._fragmentar_por_turno(df)
 
         # Año y Mes operativos, no de calendario: el día operativo va de corte a
         # corte (08:00 locales, el cambio de turno TD/TN), de modo que el turno
@@ -345,10 +341,6 @@ class DataTransformer:
                (df['Desc_detencion'].notna() & df['Desc_detencion'].str.strip().ne(''))
         df.loc[mask, 'Tipo_registro'] = 'detencion'
 
-        # `_caso_turno` era de trabajo: ya lo consumió el cálculo de extras y
-        # no forma parte del esquema que lee el BI.
-        df = df.drop(columns=['_caso_turno'], errors='ignore')
-
         # Reordenar columnas (solo las que existen en el DataFrame)
         valid_columns = [col for col in self.column_order if col in df.columns]
         remaining_columns = [col for col in df.columns if col not in valid_columns and col != 'Tipo_registro']
@@ -356,72 +348,112 @@ class DataTransformer:
 
         return df
     
-    def _avisar_turnos_sin_resolver(self, df) -> None:
-        """Informa los turnos que no se pudieron calcular con el config.
+    def _fragmentar_por_turno(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Expande cada fila en un tramo por cada turno que su intervalo cruza.
 
-        Son casos que el JSON no cubre, no errores de datos: si quedan muchos,
-        falta cargar una vigencia o los días de fin de semana.
+        Usa `Horarios.tramos()`: un tramo por turno real (TD/TT/TN) o por TNL
+        (fin de semana, el hueco entre turnos, o un feriado marcado en
+        `Comentarios`). El resto de las columnas de negocio se copia igual a
+        cada tramo; `Q_prod_total` y `Duracion(min)` se reparten proporcional
+        a la duración de cada uno (el último tramo se lleva el resto exacto,
+        para no perder producción por redondeo). `Turno_Origen` conserva lo
+        que declaró el proveedor -- incluso cuando el tramo lo pisa (feriado),
+        o cuando el intervalo simplemente cruzó de turno.
+
+        Cuando `tramos()` no tiene base para decidir (área desconocida o
+        fecha anterior a toda vigencia, `turno is None`) la fila no se
+        fragmenta más allá de ese punto y conserva el turno de origen: no hay
+        horario contra el cual cortar, e inventar uno sería peor que dejar el
+        dato tal como vino.
         """
-        casos = df['_caso_turno'].value_counts()
-        sin_vigencia = int(casos.get(Caso.SIN_VIGENCIA, 0))
-        fin_de_semana = int(casos.get(Caso.FIN_DE_SEMANA, 0))
+        registros = df.to_dict("records")
+        expandido = []
+        sin_area = 0
+        sin_vigencia = 0
+        for registro in registros:
+            inicio = registro['Fecha_Hora_Inicio']
+            fin = registro['Fecha_Hora_Termino']
+            declarado = registro.get('Turno')
+
+            if not isinstance(inicio, datetime) or not isinstance(fin, datetime):
+                nuevo = dict(registro)
+                nuevo['Turno_Origen'] = declarado
+                nuevo['Fecha_Inicio_Turno'] = None
+                expandido.append(nuevo)
+                continue
+
+            tramos = self.horarios.tramos(registro['Linea'], inicio, fin, registro.get('Comentarios'))
+            if not tramos:
+                tramos = [(inicio, fin, declarado, None)]
+
+            # Una fila que no se fragmenta (el caso inmensamente más común)
+            # conserva su Duracion(min)/Q_prod_total tal como vinieron del
+            # origen, en vez de recalcularlos desde los timestamps: son la
+            # misma cantidad salvo por redondeos de segundos en la fuente, y
+            # recalcular de más rompería `Duracion(min)` para filas que hoy
+            # no cruzan ningún borde de turno.
+            fragmentada = len(tramos) > 1
+            dur_total = (fin - inicio).total_seconds()
+            prod_total = registro.get('Q_prod_total')
+            prod_total = float(prod_total) if pd.notna(prod_total) else 0.0
+            prod_restante = prod_total
+            for idx, (t_ini, t_fin, turno, caso) in enumerate(tramos):
+                if caso == Caso.SIN_AREA:
+                    sin_area += 1
+                elif caso == Caso.SIN_VIGENCIA:
+                    sin_vigencia += 1
+
+                nuevo = dict(registro)
+                nuevo['Fecha_Hora_Inicio'] = t_ini
+                nuevo['Fecha_Hora_Termino'] = t_fin
+                if fragmentada:
+                    dur_tramo = (t_fin - t_ini).total_seconds()
+                    nuevo['Duracion(min)'] = dur_tramo / 60
+                    if idx == len(tramos) - 1:
+                        prod_tramo = prod_restante
+                    elif dur_total > 0:
+                        prod_tramo = round(prod_total * (dur_tramo / dur_total), 4)
+                    else:
+                        prod_tramo = 0.0
+                    prod_restante -= prod_tramo
+                    nuevo['Q_prod_total'] = prod_tramo
+                turno_final = turno if turno is not None else declarado
+                nuevo['Turno'] = turno_final
+                nuevo['Turno_Origen'] = declarado
+                nuevo['Fecha_Inicio_Turno'] = self.horarios.fecha_inicio_turno(turno_final, t_ini)
+                expandido.append(nuevo)
+
+        if sin_area:
+            print(f"  AVISO: {sin_area} tramos sin área conocida en horarios.json; "
+                  "conservan el turno de origen.")
         if sin_vigencia:
-            primera = df.loc[df['_caso_turno'] == Caso.SIN_VIGENCIA, 'Fecha_Hora_Inicio'].min()
-            print(f"  AVISO: {sin_vigencia} filas sin vigencia aplicable en horarios.json "
-                  f"(la más antigua, {primera}). Conservan el turno de origen.")
-        if fin_de_semana:
-            print(f"  AVISO: {fin_de_semana} filas de sábado/domingo sin turno de origen; "
-                  "horarios.json no define esos días. Se clasifican como TD sin horas extra.")
+            print(f"  AVISO: {sin_vigencia} tramos sin vigencia aplicable en horarios.json; "
+                  "conservan el turno de origen.")
+
+        columnas = list(df.columns)
+        for extra in ('Turno_Origen', 'Fecha_Inicio_Turno'):
+            if extra not in columnas:
+                columnas.append(extra)
+        return pd.DataFrame(expandido, columns=columnas)
 
     def _calcular_minutos_extras(self, row) -> float:
-        """Calcula los minutos extras trabajados después del horario de término.
-        Solo aplica para línea TERMOFORMADO con Q_prod_total > 0.
-        Si el TD (Turno Día) cae en fin de semana, todo el tiempo trabajado es considerado extra.
+        """Minutos extra: producción de Termoformado dentro de un tramo TNL.
+
+        Antes esto se calculaba detectando cuándo un tramo TD sin fragmentar
+        seguía trabajando después de su fin oficial (18:00, o el hueco hasta
+        las 23:00). Ahora ese hueco ya es su propio tramo TNL (ver
+        `Horarios.tramos`), así que lo extra es directamente la duración de
+        ese tramo cuando hubo producción -- no hace falta comparar contra la
+        hora de fin del JSON.
         """
-        minutos_extras = 0
         linea = row['Linea']
-        
-        # Solo aplicar la lógica a la línea TERMOFORMADO
         if linea.upper().strip() != 'TERMOFORMADO':
-            return minutos_extras
-
-        # Fin de semana y filas sin vigencia: el turno lo pusimos nosotros sin
-        # un horario del config detrás, así que no hay fin de jornada contra el
-        # cual medir el exceso. Decisión del 2026-09-16.
-        if sin_horas_extra(row.get('_caso_turno', '')):
-            return minutos_extras
-        
-        # Solo aplicar si hay producción (Q_prod_total > 0)
+            return 0.0
+        if row.get('Turno') != TNL:
+            return 0.0
         if pd.isna(row['Q_prod_total']) or row['Q_prod_total'] <= 0:
-            return minutos_extras
-        
-        inicio = row['Fecha_Hora_Inicio']
-        termino = row['Fecha_Hora_Termino']
-        turno_actual = row['Turno']
-        
-        # Si TD cae en fin de semana (sábado=5, domingo=6), todo el tiempo es extra
-        if turno_actual == 'TD':
-            day_of_week = inicio.weekday()
-            if day_of_week >= 5:  # Sábado o domingo
-                minutos_extras = (termino - inicio).total_seconds() / 60
-                return minutos_extras
-
-        # El fin sale del JSON, no de la extensión del hueco: el Día de
-        # Termoformado se clasifica hasta las 23:00 pero termina oficialmente a
-        # las 18:00, y lo trabajado después de esa hora es justamente lo extra.
-        hora_fin = self.horarios.fin_de_turno(linea, turno_actual, inicio)
-        if hora_fin is None:
-            return minutos_extras
-
-        # Calcular minutos extras según la lógica especificada
-        if inicio >= hora_fin:
-            # Si el inicio es mayor o igual a hora_fin: Fecha_Hora_Termino - Fecha_Hora_Inicio
-            minutos_extras = (termino - inicio).total_seconds() / 60
-        elif termino > hora_fin:
-            # Si el inicio es menor a hora_fin: Fecha_Hora_Termino - hora_fin
-            minutos_extras = (termino - hora_fin).total_seconds() / 60
-        
-        return minutos_extras
+            return 0.0
+        return (row['Fecha_Hora_Termino'] - row['Fecha_Hora_Inicio']).total_seconds() / 60
     
     def _obtener_hora_termino_turno(self, row):
         """Obtiene la hora de término del turno según la línea y turno.
@@ -429,12 +461,16 @@ class DataTransformer:
         """
         linea = row['Linea']
         turno_actual = row['Turno']
-        
+
         # Solo aplicar para TERMOFORMADO
         if linea.upper().strip() != 'TERMOFORMADO':
             return None
-        
-        franja = self.horarios.franja(turno_actual, row['Fecha_Hora_Inicio'])
+
+        # `franja_vigente`, no `franja`: una fila cuyo turno TN viene del
+        # origen puede tener su `start` ya en el día calendario siguiente (el
+        # TN del viernes entrado el sábado de madrugada), y ese día no tiene
+        # horario propio en horarios.json.
+        franja = self.horarios.franja_vigente(turno_actual, row['Fecha_Hora_Inicio'])
         if franja is None:
             return None
         return franja[1].strftime("%H:%M")
@@ -451,27 +487,26 @@ class DataTransformer:
             return None
         
         inicio = row['Fecha_Hora_Inicio']
-        
+
         # Verificar si es domingo (6 = domingo en Python)
         if inicio.dayofweek == 6:
             return 'No'
-        
+
         turno_actual = row['Turno']
 
-        franja = self.horarios.franja(turno_actual, inicio)
-        if franja is None:
+        # TNL ya significa "no laboral": no tiene ventana propia en el JSON
+        # contra la cual comparar.
+        if turno_actual == TNL:
+            return 'No'
+
+        # `ventana_turno`, no `franja` + aritmética propia: ya resuelve a qué
+        # día calendario pertenece cada extremo, incluida la cola de un turno
+        # que cruza medianoche y cuyo día de llegada no tiene horario propio
+        # en el JSON (el TN del viernes, entrado el sábado de madrugada).
+        ventana = self.horarios.ventana_turno(turno_actual, inicio)
+        if ventana is None:
             return None
-        arranca, termina = franja
-
-        hora_inicio_turno = datetime.combine(inicio.date(), arranca)
-        hora_fin_turno = datetime.combine(inicio.date(), termina)
-
-        # Ajustar para turnos nocturnos
-        if hora_fin_turno <= hora_inicio_turno:
-            hora_fin_turno += pd.Timedelta(days=1)
-            # Si estamos en el día siguiente y el inicio es después de medianoche
-            if inicio.time() < arranca:
-                hora_inicio_turno -= pd.Timedelta(days=1)
+        hora_inicio_turno, hora_fin_turno = ventana
 
         # Verificar si está dentro del horario laboral
         if hora_inicio_turno <= inicio <= hora_fin_turno:

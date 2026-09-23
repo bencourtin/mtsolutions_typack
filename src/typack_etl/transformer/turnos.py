@@ -55,18 +55,36 @@ Las reglas que no salen del JSON
 from __future__ import annotations
 
 import unicodedata
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timedelta
 from typing import Mapping
 
 # Lo que el origen manda cuando no sabe qué turno es.
 SIN_DATO = frozenset({"", "T0", "-", "0", "NONE", "NAN"})
 
 # El turno al que van el hueco de Termoformado y el fin de semana sin horario.
+# Usado por `clasificar()` (una fila = un turno, no se fragmenta). El motor de
+# fragmentación (`Horarios.tramos()`, más abajo) usa TNL para lo mismo: ver su
+# docstring para por qué las dos reglas conviven.
 TURNO_DEL_HUECO = "TD"
 TURNO_FIN_DE_SEMANA = "TD"
 AREA_CON_HUECO = "Termoformado"
 
+# Turno No Laboral: lo que le corresponde a un tramo fragmentado (`tramos()`)
+# que cae fuera de cualquier franja de `turnos_permitidos` (fin de semana, el
+# hueco entre turnos) o que el comentario del registro marca como feriado. No
+# es un turno de `horarios.json` — no tiene franja horaria propia — así que
+# `franja_vigente("TNL", ...)` y `ventana_turno("TNL", ...)` devuelven `None`
+# sin necesidad de código especial: es exactamente el comportamiento que
+# necesitan `Hora_Termino_Turno` y `Periodo_Laboral` para un tramo no laboral.
+TNL = "TNL"
+
 _AREAS_DATOS = {"TERMOFORMADO": "Termoformado", "EXTRUSION": "Extrusion"}
+
+# La única palabra que hoy marca un feriado en los datos reales (verificado en
+# Extrusión, agosto 2026): vive en `Comentarios`, no en `Desc_detencion`. Un
+# feriado puede traer un turno ya declarado por el proveedor (TD/TT/TN, no
+# sólo T0), así que la detección no depende de `SIN_DATO`.
+_TOKEN_FERIADO = "FERIADO"
 
 # Los días como los nombra el JSON: sin tildes y en minúscula.
 DIAS = ("lunes", "martes", "miercoles", "jueves", "viernes", "sabado", "domingo")
@@ -81,6 +99,10 @@ class Caso:
     FIN_DE_SEMANA = "fin_de_semana"    # sábado o domingo: el JSON no los define
     SIN_VIGENCIA = "sin_vigencia"      # fecha anterior a la vigencia más antigua
     SIN_AREA = "sin_area"              # la línea no mapea a un área del config
+
+    # Casos propios de `Horarios.tramos()` (fragmentación por turno).
+    NO_CUBIERTO = "no_cubierto"        # tramo fuera de toda franja: hueco o fin de semana -> TNL
+    FERIADO = "feriado"                # comentario marca feriado: pisa el turno ya declarado -> TNL
 
 
 def _sin_tildes(texto) -> str:
@@ -97,6 +119,23 @@ def normalizar_area(linea) -> str | None:
     normalizar, el área no se encuentra y toda Extrusión quedaría sin clasificar.
     """
     return _AREAS_DATOS.get(_sin_tildes(linea))
+
+
+def es_feriado(comentario) -> bool:
+    """True si `comentario` (columna `Comentarios`) marca un feriado.
+
+    `horarios.json` no contempla feriados -- no hay campo para eso -- así que
+    esto es lo único que los distingue de un día laboral común. Tolerante a
+    `None`/`NaN`/`pd.NA`: `Comentarios` está vacío en la enorme mayoría de las
+    filas, y no vale la pena acoplar este módulo a pandas sólo para el chequeo
+    de nulos (evita además el `TypeError` de `pd.NA` en un `or`).
+    """
+    if comentario is None:
+        return False
+    texto = str(comentario).strip()
+    if not texto or texto.lower() in ("nan", "<na>", "none"):
+        return False
+    return _TOKEN_FERIADO in _sin_tildes(texto)
 
 
 def _hora(texto) -> time:
@@ -148,9 +187,15 @@ class Horarios:
     def __init__(self, cfg: Mapping):
         self.cfg = cfg
         # De la más reciente a la más antigua: la primera que no sea posterior
-        # a la fecha buscada es la que rige.
+        # a la fecha buscada es la que rige. Se incluyen también las vigencias
+        # `vigente: false`: el flag no decide qué vigencia aplica a una fecha,
+        # sólo si esa vigencia sigue rigiendo *hoy*. Una vigencia vieja marcada
+        # `vigente: false` puede seguir siendo la que corresponde a una fecha
+        # histórica que cayó dentro de su rango -- antes de que la siguiente
+        # (por `vigencia_desde`) la reemplazara -- y filtrarla acá la dejaría
+        # sin horario aplicable aunque el JSON sí lo tenga.
         self.vigencias = sorted(
-            (Vigencia(v) for v in cfg["vigencias"] if v.get("vigente")),
+            (Vigencia(v) for v in cfg["vigencias"]),
             key=lambda v: v.desde,
             reverse=True,
         )
@@ -182,11 +227,115 @@ class Horarios:
         El día es el de inicio del turno: el TN del viernes usa el horario del
         viernes aunque termine el sábado. Devuelve None si no hay vigencia o si
         el día no está definido (sábado y domingo).
+
+        Sólo mira el día propio de `momento`. Para resolver una fila cuyo
+        `start` ya cayó en el día calendario siguiente al que arrancó su
+        turno —el caso del TN del viernes, que sigue corriendo el sábado de
+        madrugada y sábado no tiene horario propio en el JSON— hace falta
+        `franja_vigente()`.
         """
         vigencia = self.vigencia_para(momento)
         if vigencia is None or not isinstance(momento, datetime):
             return None
         return vigencia.franja(turno, DIAS[momento.weekday()])
+
+    def franja_vigente(self, turno: str, momento: datetime) -> tuple[time, time] | None:
+        """`franja()`, pero sigue el turno un día atrás si hace falta.
+
+        El TN del viernes cruza medianoche y sábado no tiene horario propio en
+        el JSON, así que `franja("TN", <sábado de madrugada>)` da `None` aunque
+        el turno ya se conozca (por origen: `clasificar()` no lo toca). Sin
+        esto, cualquier fila cuyo `start` cayó del otro lado de la medianoche
+        pierde su horario de referencia: hora de término, minutos extra y
+        período laboral quedan en blanco para el tramo de un turno de noche
+        que es exactamente el que más importa medir.
+
+        Ojo con un caso más sutil: si HOY sí define el turno pero `momento`
+        cae antes de que arranque (su propia madrugada, no su noche), la
+        franja propia de hoy no sirve para esa madrugada -- pertenece, si
+        acaso, a la ocurrencia de AYER, con los horarios de AYER. Confundir
+        las dos importa cuando un día cambia de horario respecto al anterior
+        (el viernes suele arrancar más temprano que el resto de la semana):
+        usar los números de hoy para describir la cola de ayer arma una
+        ventana que no corresponde a ningún turno real declarado, y que en el
+        peor de los casos no avanza -- ver `Horarios.tramos()`, que depende de
+        que esto nunca devuelva una ventana que ya terminó.
+
+        Si el día propio de `momento` no define el turno, o lo define pero
+        `momento` está en su propia madrugada, se prueba el día anterior: si
+        ese horario cruza medianoche (`termina <= arranca`) y la hora de
+        `momento` cae antes de `termina`, es la cola de ese turno -- no uno
+        nuevo que hoy no tiene horario. Un turno que no cruza medianoche
+        (TD, TT) nunca activa este camino.
+        """
+        if not isinstance(momento, datetime):
+            return None
+        propia = self.franja(turno, momento)
+        if propia is not None:
+            arranca, termina = propia
+            if arranca <= termina or momento.time() >= arranca:
+                return propia
+            # Cruza medianoche y `momento` todavía no llegó a `arranca`: es
+            # la propia madrugada de hoy, no la noche. Sigue a `anterior`.
+        anterior = self.franja(turno, momento - timedelta(days=1))
+        if anterior is None:
+            return None
+        arranca, termina = anterior
+        if termina <= arranca and momento.time() < termina:
+            return anterior
+        return None
+
+    def ventana_turno(self, turno: str, momento: datetime) -> tuple[datetime, datetime] | None:
+        """Inicio y fin del turno que rige en `momento`, con fecha y todo.
+
+        A diferencia de `franja()`/`franja_vigente()`, que sólo dan horas del
+        día, esto resuelve a qué día calendario pertenece cada extremo: si
+        `momento` está en la franja vespertina en que arranca su propio turno,
+        el fin cae al día siguiente (turno que cruza medianoche); si está en la
+        madrugada, es el inicio el que quedó ayer. Necesario para no adivinar
+        mal cuando el turno lo trae el origen y el día de `momento` no tiene
+        horario propio (el TN del viernes, ya en sábado).
+        """
+        franja = self.franja_vigente(turno, momento)
+        if franja is None or not isinstance(momento, datetime):
+            return None
+        arranca, termina = franja
+        cruza_medianoche = termina <= arranca
+        if cruza_medianoche and momento.time() < arranca:
+            # Madrugada: la cola de un turno que arrancó el día calendario
+            # anterior (con su propio horario, o con el de un día sin
+            # definición propia que "prestó" `franja_vigente`).
+            inicio_dt = datetime.combine(momento.date() - timedelta(days=1), arranca)
+            fin_dt = datetime.combine(momento.date(), termina)
+        else:
+            inicio_dt = datetime.combine(momento.date(), arranca)
+            fin_dt = datetime.combine(momento.date(), termina)
+            if cruza_medianoche:
+                fin_dt += timedelta(days=1)
+        return inicio_dt, fin_dt
+
+    def fecha_inicio_turno(self, turno: str | None, momento: datetime) -> date | None:
+        """La fecha en que arrancó el turno que contiene `momento`, no la de `momento`.
+
+        `horarios.json` no define sábado ni domingo, así que un turno real
+        nunca puede arrancar esos días: uno que sigue corriendo ahí (el TN del
+        viernes, entrado el sábado de madrugada) le pertenece igual al día en
+        que arrancó. Usa `ventana_turno()` -- ya resuelve exactamente esto,
+        vía `franja_vigente()` -- en vez de `momento.date()` directo, que daría
+        el día de la fila de datos y no el del turno.
+
+        Para `TNL` o cuando no hay turno que resolver (área o vigencia
+        desconocida), no hay "arranque de turno" que perseguir: la fecha es
+        la del propio tramo.
+        """
+        if not isinstance(momento, datetime):
+            return None
+        if turno is None or turno == TNL:
+            return momento.date()
+        ventana = self.ventana_turno(turno, momento)
+        if ventana is None:
+            return momento.date()
+        return ventana[0].date()
 
     def hueco(self, momento: datetime) -> tuple[time, time] | None:
         """La franja sin turno de Termoformado ese día: del fin de TD al inicio de TN.
@@ -214,6 +363,25 @@ class Horarios:
         """
         for turno in self.permitidos(area):
             franja = self.franja(turno, momento)
+            if franja and _dentro(momento.time(), *franja):
+                return turno
+        return None
+
+    def _turno_vigente_en(self, area: str, momento: datetime) -> str | None:
+        """Como `turno_por_hora()`, pero sigue un turno hasta el día siguiente.
+
+        `turno_por_hora()` usa `franja()`, que sólo mira la franja propia de
+        `momento.date()`: un turno nocturno que sigue corriendo en un día sin
+        horario propio (sábado sin definición, tras el TN del viernes) le da
+        `None` aunque el turno siga activo. Usa `franja_vigente()` -- la misma
+        fuente de verdad que `ventana_turno()` para el fin del tramo -- para
+        que el inicio y el fin de cada tramo se decidan con el mismo criterio;
+        tener dos lecturas distintas de la misma ambigüedad (madrugada propia
+        vs. cola de ayer) fue justamente el bug que hizo que `tramos()` dejara
+        de avanzar en un viernes cuyo horario difiere del jueves.
+        """
+        for turno in self.permitidos(area):
+            franja = self.franja_vigente(turno, momento)
             if franja and _dentro(momento.time(), *franja):
                 return turno
         return None
@@ -265,21 +433,115 @@ class Horarios:
         Es el fin que dice el JSON, **sin** la extensión del hueco: las horas
         extra se cuentan contra las 18:00 (o las 15:00 del viernes) aunque para
         clasificar el Día de Termoformado llegue hasta que arranca la noche.
-        """
-        from datetime import timedelta
 
+        Usa `ventana_turno()`, que resuelve el fin aunque `inicio` ya haya
+        cruzado a un día sin horario propio en el JSON (el TN del viernes,
+        entrado el sábado de madrugada): sin eso, esas filas se quedaban sin
+        fin de turno y por lo tanto sin minutos extra.
+        """
         area = normalizar_area(linea)
         if area is None or not isinstance(inicio, datetime):
             return None
-        franja = self.franja(turno, inicio)
-        if franja is None:
+        ventana = self.ventana_turno(turno, inicio)
+        return ventana[1] if ventana else None
+
+    # -- fragmentación por turno -------------------------------------------
+
+    def _inicio_siguiente_turno(
+        self, area: str, cursor: datetime, horizonte_dias: int = 14
+    ) -> datetime | None:
+        """Cuándo empieza el próximo turno definido después de `cursor`.
+
+        Mira día por día hasta `horizonte_dias` hacia adelante en vez de sólo
+        el día de `cursor`: un tramo sin turno puede durar más de un día (un
+        fin de semana largo, un corte de varios días), y nada distingue un día
+        TNL del siguiente como para cortarlo ahí. `None` si no encuentra nada
+        en el horizonte -- el llamador lo trata como "el resto queda TNL".
+        """
+        permitidos = self.permitidos(area)
+        if not permitidos:
             return None
-        arranca, termina = franja
-        fin = datetime.combine(inicio.date(), termina)
-        if termina <= arranca and inicio.time() >= arranca:
-            # Turno que cruza medianoche y el registro está en el tramo previo.
-            fin += timedelta(days=1)
-        return fin
+        for offset in range(horizonte_dias + 1):
+            dia = cursor.date() + timedelta(days=offset)
+            candidatos = []
+            for turno in permitidos:
+                franja = self.franja(turno, datetime.combine(dia, time(12, 0)))
+                if franja is None:
+                    continue
+                inicio_turno = datetime.combine(dia, franja[0])
+                if inicio_turno > cursor:
+                    candidatos.append(inicio_turno)
+            if candidatos:
+                return min(candidatos)
+        return None
+
+    def _fin_de_tramo(self, area: str, cursor: datetime, turno: str | None) -> datetime | None:
+        """Cuándo termina el tramo que arranca en `cursor`.
+
+        Si `turno` es uno real (TD/TT/TN), es el fin de su propia ventana --
+        ya resuelve el cruce de medianoche. Si es `None` (tramo no cubierto:
+        hueco o fin de semana), es el inicio del próximo turno definido.
+        """
+        if turno is not None:
+            ventana = self.ventana_turno(turno, cursor)
+            if ventana is not None:
+                return ventana[1]
+        return self._inicio_siguiente_turno(area, cursor)
+
+    def tramos(self, linea, inicio, fin, comentario=None) -> list[tuple[datetime, datetime, str | None, str]]:
+        """Fragmenta `[inicio, fin)` en tramos de un único turno cada uno.
+
+        Cada elemento es `(inicio_tramo, fin_tramo, turno, caso)`. `turno` es
+        `TD`/`TT`/`TN` cuando el tramo cae dentro de una franja de
+        `turnos_permitidos`, `TNL` cuando no (fin de semana, el hueco entre
+        turnos, o feriado), o `None` cuando no hay base para decidir (área
+        desconocida, o fecha anterior a toda vigencia) -- en ese caso el
+        llamador debe conservar lo que trajo el origen, no inventar.
+
+        El feriado (`es_feriado()`, que lee `comentario`) pisa cualquier turno
+        que el proveedor ya haya declarado: es la misma clase de excepción que
+        el hueco de Termoformado en `clasificar()`, pero por comentario en vez
+        de por hora. No se fragmenta más allá de eso: dentro de un feriado no
+        hay nada que distinga un tramo de otro.
+
+        Los límites son medio-abiertos (`[inicio, fin)`), igual que el resto
+        del módulo: un intervalo que empieza o termina justo en un borde de
+        turno cae entero de un lado, sin generar tramos de duración cero.
+
+        No decide por sí sola cuál vigencia aplica a fechas *futuras* a las
+        que ya conoce, ni fragmenta más allá del primer punto sin vigencia:
+        una fila de fecha anterior a la vigencia más antigua se devuelve
+        entera (ver `Caso.SIN_VIGENCIA`), igual que hoy hace `clasificar()`.
+        """
+        if not isinstance(inicio, datetime) or not isinstance(fin, datetime) or fin <= inicio:
+            return []
+
+        area = normalizar_area(linea)
+        if area is None:
+            return [(inicio, fin, None, Caso.SIN_AREA)]
+
+        if es_feriado(comentario):
+            return [(inicio, fin, TNL, Caso.FERIADO)]
+
+        tramos: list[tuple[datetime, datetime, str | None, str]] = []
+        cursor = inicio
+        while cursor < fin:
+            if self.vigencia_para(cursor) is None:
+                tramos.append((cursor, fin, None, Caso.SIN_VIGENCIA))
+                break
+            turno = self._turno_vigente_en(area, cursor)
+            fin_tramo = self._fin_de_tramo(area, cursor, turno)
+            if fin_tramo is None or fin_tramo > fin or fin_tramo <= cursor:
+                # `fin_tramo <= cursor` no debería pasar -- significaría un
+                # tramo que no avanza -- pero un horario mal formado en
+                # horarios.json (o una futura vigencia con un patrón que hoy
+                # no existe) podría producirlo. Cerrar acá en vez de girar en
+                # el lugar: un ETL colgado es peor que un tramo final de más.
+                fin_tramo = fin
+            caso = Caso.CALCULADO if turno else Caso.NO_CUBIERTO
+            tramos.append((cursor, fin_tramo, turno or TNL, caso))
+            cursor = fin_tramo
+        return tramos
 
 
 def sin_horas_extra(caso: str) -> bool:

@@ -13,8 +13,10 @@ import pytest
 
 from config.settings import load_horarios
 from typack_etl.transformer.turnos import (
+    TNL,
     Caso,
     Horarios,
+    es_feriado,
     normalizar_area,
     sin_horas_extra,
 )
@@ -271,6 +273,57 @@ def test_el_fin_de_TN_cae_al_dia_correcto(horarios, inicio, fin_esperado):
 
 
 # --------------------------------------------------------------------------
+# Regla 8.bis: la cola del TN del viernes, ya en sábado (sábado no está en
+# el JSON, así que `franja()` sola no alcanza para resolverla)
+# --------------------------------------------------------------------------
+
+@pytest.mark.parametrize("inicio,franja_esperada", [
+    (f"{SABADO_INV} 00:30:00", ("21:30", "08:30")),
+    (f"{SABADO_INV} 02:00:00", ("21:30", "08:30")),
+    (f"{SABADO_INV} 08:29:59", ("21:30", "08:30")),
+    ("2026-09-12 00:30:00", ("20:00", "07:00")),   # sábado de verano
+    ("2026-09-12 06:59:59", ("20:00", "07:00")),
+])
+def test_franja_vigente_resuelve_la_cola_del_TN_del_viernes(horarios, inicio, franja_esperada):
+    """`franja()` sola da None (sábado no está en el JSON); `franja_vigente()` no."""
+    assert horarios.franja("TN", dt(inicio)) is None
+    obtenida = horarios.franja_vigente("TN", dt(inicio))
+    assert obtenida is not None
+    assert tuple(x.strftime("%H:%M") for x in obtenida) == franja_esperada
+
+
+@pytest.mark.parametrize("inicio", [
+    f"{SABADO_INV} 08:30:00",  # justo el borde: el TN del viernes ya terminó
+    f"{SABADO_INV} 12:00:00",
+])
+def test_franja_vigente_no_se_extiende_mas_alla_del_fin_del_turno(horarios, inicio):
+    """Pasado el fin del TN del viernes, el sábado sigue sin horario: no se inventa uno."""
+    assert horarios.franja_vigente("TN", dt(inicio)) is None
+
+
+def test_ventana_turno_del_TN_del_viernes_entrado_el_sabado(horarios):
+    ventana = horarios.ventana_turno("TN", dt(f"{SABADO_INV} 02:00:00"))
+    assert ventana == (dt(f"{VIERNES_INV} 21:30:00"), dt(f"{SABADO_INV} 08:30:00"))
+
+
+@pytest.mark.parametrize("inicio,fin_esperado", [
+    (f"{SABADO_INV} 00:30:00", f"{SABADO_INV} 08:30:00"),
+    (f"{SABADO_INV} 02:00:00", f"{SABADO_INV} 08:30:00"),
+    ("2026-09-12 03:00:00", "2026-09-12 07:00:00"),  # sábado de verano
+])
+def test_el_fin_de_TN_tambien_cae_bien_cuando_ya_es_sabado(horarios, inicio, fin_esperado):
+    """Antes de `franja_vigente`, esto daba None: sin fin de turno, sin horas extra."""
+    assert horarios.fin_de_turno("TERMOFORMADO", "TN", dt(inicio)) == dt(fin_esperado)
+
+
+def test_el_TN_del_viernes_entrado_el_sabado_queda_dentro_de_su_propia_ventana(horarios):
+    """Es la ventana que usa `_determinar_periodo_laboral` para decidir 'Sí'/'No'."""
+    inicio = dt(f"{SABADO_INV} 02:00:00")
+    ventana = horarios.ventana_turno("TN", inicio)
+    assert ventana[0] <= inicio <= ventana[1]
+
+
+# --------------------------------------------------------------------------
 # Regla 10: fin de semana
 # --------------------------------------------------------------------------
 
@@ -329,3 +382,209 @@ def test_cada_vigencia_define_los_cinco_dias_habiles():
     for v in load_horarios()["vigencias"]:
         for turno, por_dia in v["horarios"].items():
             assert set(por_dia) == habiles, f"{v['id']}.{turno}"
+
+
+# --------------------------------------------------------------------------
+# Selección de vigencia por rango de fechas (incluye `vigente: false`)
+# --------------------------------------------------------------------------
+#
+# `horarios.json` hoy no trae ninguna vigencia `vigente: false` -- las dos que
+# existen están vigentes -- así que este bloque arma una config sintética
+# mínima en vez de reusar `load_horarios()`, para probar el caso que sí va a
+# ocurrir cuando se agregue una vigencia nueva y la anterior pase a `false`.
+
+def _cfg_dos_vigencias():
+    return {
+        "turnos": {"TD": {"nombre": "Día"}},
+        "areas": {"Termoformado": {"turnos_permitidos": ["TD"]}},
+        "vigencias": [
+            {
+                "id": "vieja", "vigencia_desde": "2025-01-01", "vigente": False,
+                "horarios": {"TD": {"lunes": {"inicio": "07:00", "fin": "16:00"}}},
+            },
+            {
+                "id": "nueva", "vigencia_desde": "2026-01-01", "vigente": True,
+                "horarios": {"TD": {"lunes": {"inicio": "08:00", "fin": "18:00"}}},
+            },
+        ],
+    }
+
+
+def test_una_vigencia_vigente_false_rige_las_fechas_de_su_propio_rango():
+    """El flag `vigente` no decide qué vigencia aplica a una fecha: decide el
+    rango completo entre su `vigencia_desde` y el de la siguiente."""
+    horarios = Horarios(_cfg_dos_vigencias())
+    vigencia = horarios.vigencia_para(dt("2025-06-02 12:00:00"))  # lunes, dentro del rango viejo
+    assert vigencia.id == "vieja"
+    assert horarios.franja("TD", dt("2025-06-02 09:00:00")) == (
+        datetime.strptime("07:00", "%H:%M").time(),
+        datetime.strptime("16:00", "%H:%M").time(),
+    )
+
+
+def test_una_fecha_posterior_usa_la_vigencia_vigente_aunque_haya_una_vieja():
+    horarios = Horarios(_cfg_dos_vigencias())
+    vigencia = horarios.vigencia_para(dt(f"{LUNES_INV} 12:00:00"))
+    assert vigencia.id == "nueva"
+
+
+def test_una_fecha_anterior_a_toda_vigencia_no_resuelve_ninguna():
+    horarios = Horarios(_cfg_dos_vigencias())
+    assert horarios.vigencia_para(dt("2024-01-01 12:00:00")) is None
+
+
+# --------------------------------------------------------------------------
+# es_feriado(): la única señal de feriado son los Comentarios
+# --------------------------------------------------------------------------
+#
+# `horarios.json` no contempla feriados. Verificado sobre datos reales
+# (Extrusión, agosto 2026): la palabra vive en `Comentarios`, no en
+# `Desc_detencion`, y el turno puede venir ya declarado (TD/TT/TN, no T0).
+
+@pytest.mark.parametrize("comentario", [
+    "FERIADO", "feriado", "Feriado", "  FERIADO  ", "Feriado nacional",
+])
+def test_es_feriado_detecta_la_palabra_sin_importar_mayusculas_ni_espacios(comentario):
+    assert es_feriado(comentario)
+
+
+@pytest.mark.parametrize("comentario", [None, "", "   ", float("nan"), "OPERADOR", "Micro parada"])
+def test_es_feriado_es_false_para_lo_que_no_marca_feriado(comentario):
+    assert not es_feriado(comentario)
+
+
+# --------------------------------------------------------------------------
+# tramos(): fragmentación de un intervalo en un tramo por turno
+# --------------------------------------------------------------------------
+
+# --------------------------------------------------------------------------
+# fecha_inicio_turno(): la fecha del turno, no la del timestamp de la fila
+# --------------------------------------------------------------------------
+#
+# horarios.json no define sábado ni domingo: un turno real nunca puede
+# arrancar esos días. Un tramo TN cuyos datos ya caen en la madrugada del
+# sábado (la cola del TN del viernes) le pertenece igual al viernes.
+
+def test_fecha_inicio_turno_del_TN_que_sigue_en_sabado_es_el_viernes(horarios):
+    momento = dt(f"{SABADO_INV} 01:37:00")
+    assert horarios.fecha_inicio_turno("TN", momento) == dt(f"{VIERNES_INV} 00:00:00").date()
+
+
+def test_fecha_inicio_turno_de_un_turno_que_no_cruza_medianoche_es_su_propio_dia(horarios):
+    momento = dt(f"{LUNES_INV} 10:00:00")
+    assert horarios.fecha_inicio_turno("TD", momento) == dt(f"{LUNES_INV} 00:00:00").date()
+
+
+def test_fecha_inicio_turno_de_TNL_es_la_del_propio_tramo(horarios):
+    """TNL no es un turno real: no hay "arranque" que perseguir más allá del sábado mismo."""
+    momento = dt(f"{SABADO_INV} 10:00:00")
+    assert horarios.fecha_inicio_turno(TNL, momento) == dt(f"{SABADO_INV} 00:00:00").date()
+
+
+def test_tramos_ejemplo_base_TD_hueco_TN(horarios):
+    """El caso de negocio original: TF5 16:00->23:37 TD se parte en TD/TNL/TN."""
+    inicio, fin = dt("2026-09-22 16:00:00"), dt("2026-09-22 23:37:00")
+    resultado = horarios.tramos("TERMOFORMADO", inicio, fin)
+    assert [(t[0], t[1], t[2]) for t in resultado] == [
+        (dt("2026-09-22 16:00:00"), dt("2026-09-22 18:00:00"), "TD"),
+        (dt("2026-09-22 18:00:00"), dt("2026-09-22 23:00:00"), TNL),
+        (dt("2026-09-22 23:00:00"), dt("2026-09-22 23:37:00"), "TN"),
+    ]
+
+
+def test_tramos_cruza_mas_de_dos_turnos_en_extrusion(horarios):
+    """Extrusión tiene TD/TT/TN habilitados: un intervalo largo cruza los tres."""
+    inicio = dt(f"{MARTES_INV} 08:00:00")
+    fin = dt("2026-06-17 02:00:00")  # miércoles de madrugada
+    resultado = horarios.tramos("EXTRUSIÓN", inicio, fin)
+
+    assert [t[2] for t in resultado] == ["TD", "TT", "TN"]
+    assert resultado[0][0] == inicio
+    assert resultado[-1][1] == fin
+    # Contiguos: sin huecos ni superposición entre tramos consecutivos.
+    for anterior, siguiente in zip(resultado, resultado[1:]):
+        assert anterior[1] == siguiente[0]
+
+
+def test_tramos_no_genera_filas_de_duracion_cero_en_un_borde_exacto(horarios):
+    """Un intervalo que arranca justo cuando termina TD no deja una fila TD vacía."""
+    inicio = dt(f"{LUNES_INV} 18:00:00")  # fin exacto de TD en Termoformado
+    fin = dt(f"{LUNES_INV} 19:00:00")
+    resultado = horarios.tramos("TERMOFORMADO", inicio, fin)
+    assert len(resultado) == 1
+    assert resultado[0][:2] == (inicio, fin)
+    assert resultado[0][2] == TNL
+
+
+def test_tramos_lunes_de_madrugada_sin_TN_de_domingo_es_TNL(horarios):
+    """Domingo no define TN: la madrugada del lunes (antes del TD) no es la
+    cola de nada, aunque la franja propia de "TN lunes" (23:00->08:00) la
+    cubra leída sin más contexto. Caso real: 2026-09-07 (lunes) traía filas
+    TN a las 00:00 y 07:49-07:59 que quedaban con Fecha_Inicio_Turno=domingo
+    -- un día que ni siquiera tiene TN definido.
+    """
+    inicio = dt(f"{LUNES_INV} 00:00:00")
+    fin = dt(f"{LUNES_INV} 08:00:00")
+    resultado = horarios.tramos("TERMOFORMADO", inicio, fin)
+    assert len(resultado) == 1
+    assert resultado[0][2] == TNL
+
+
+def test_tramos_lunes_a_las_23_arranca_su_propio_TN(horarios):
+    """La noche del lunes sí es "TN lunes" -- eso no cambia con el fix anterior."""
+    inicio = dt(f"{LUNES_INV} 23:00:00")
+    fin = dt(f"{LUNES_INV} 23:30:00")
+    resultado = horarios.tramos("TERMOFORMADO", inicio, fin)
+    assert resultado == [(inicio, fin, "TN", Caso.CALCULADO)]
+
+
+def test_tramos_viernes_de_madrugada_usa_el_horario_del_jueves_no_el_propio(horarios):
+    """Bug real: colgó el ETL en producción (2026-09-11, viernes, vigencia
+    verano). El viernes tiene su propio TN (20:00->07:00, más temprano que el
+    resto de la semana); antes de esa hora, la madrugada del viernes es la
+    cola del TN del jueves (23:00->08:00) -- con los horarios de AYER, no los
+    de hoy reinterpretados. Confundirlos arma una ventana que no corresponde
+    a ningún turno real y que no avanza: `tramos()` quedaba girando en el
+    mismo instante para siempre.
+    """
+    inicio = dt("2026-09-11 05:54:54")  # viernes, vigencia 2026-09-verano
+    fin = dt("2026-09-11 08:00:00")     # fin del TN del jueves
+    resultado = horarios.tramos("TERMOFORMADO", inicio, fin)
+
+    assert resultado == [(inicio, fin, "TN", Caso.CALCULADO)]
+
+
+def test_franja_vigente_de_la_madrugada_propia_usa_el_dia_anterior(horarios):
+    momento = dt("2026-09-11 05:54:54")
+    assert horarios.franja_vigente("TN", momento) == (
+        datetime.strptime("23:00", "%H:%M").time(),
+        datetime.strptime("08:00", "%H:%M").time(),
+    )
+
+
+def test_tramos_fin_de_semana_es_un_solo_tramo_no_uno_por_dia(horarios):
+    """Sábado completo + domingo completo: un único tramo TNL, no fragmentado por día."""
+    inicio = dt(f"{SABADO_INV} 08:30:00")   # justo tras el fin del TN del viernes
+    fin = dt("2026-06-22 08:00:00")         # lunes siguiente, inicio del TD
+    resultado = horarios.tramos("TERMOFORMADO", inicio, fin)
+    assert len(resultado) == 1
+    assert resultado[0][2] == TNL
+
+
+def test_tramos_feriado_pisa_el_turno_ya_declarado_por_el_origen(horarios):
+    """Un feriado en día de semana es TNL de punta a punta, sin fragmentar más."""
+    inicio, fin = dt(f"{MARTES_INV} 10:00:00"), dt(f"{MARTES_INV} 12:00:00")
+    resultado = horarios.tramos("EXTRUSIÓN", inicio, fin, comentario="Feriado")
+    assert resultado == [(inicio, fin, TNL, Caso.FERIADO)]
+
+
+def test_tramos_sin_area_conocida_no_fragmenta(horarios):
+    inicio, fin = dt(f"{LUNES_INV} 08:00:00"), dt(f"{LUNES_INV} 20:00:00")
+    resultado = horarios.tramos("LINEA NUEVA", inicio, fin)
+    assert resultado == [(inicio, fin, None, Caso.SIN_AREA)]
+
+
+def test_tramos_sin_vigencia_aplicable_no_fragmenta(horarios):
+    inicio, fin = dt("2025-06-16 20:00:00"), dt("2025-06-17 02:00:00")
+    resultado = horarios.tramos("TERMOFORMADO", inicio, fin)
+    assert resultado == [(inicio, fin, None, Caso.SIN_VIGENCIA)]

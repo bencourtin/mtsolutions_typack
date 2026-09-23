@@ -1,4 +1,4 @@
-"""Reglas de negocio: hora local, mes operativo y ausencia del split de medianoche."""
+"""Reglas de negocio: hora local, mes operativo y fragmentación por turno."""
 
 import csv
 from datetime import datetime
@@ -50,15 +50,80 @@ def test_las_tres_rutas_se_pueden_aislar(tmp_path):
 
 
 # --------------------------------------------------------------------------
-# Sin split de medianoche
+# Fragmentación por turno
 # --------------------------------------------------------------------------
+#
+# Cada fila se parte en un tramo por cada turno que su intervalo cruza (ver
+# `Horarios.tramos`): TD/TT/TN cuando cae dentro de una franja de
+# horarios.json, TNL cuando no (fin de semana, el hueco entre turnos, o un
+# feriado marcado en Comentarios). El split viejo (un corte fijo a
+# medianoche, sin importar el turno) se sacó porque perdía los días del medio
+# en intervalos largos -- `test_un_registro_de_varios_dias_conserva_su_duracion`
+# es justamente el caso que lo destapó, y sigue valiendo con el split nuevo
+# porque ese intervalo cae antes de toda vigencia (no hay horario contra el
+# cual fragmentar) y se conserva entero.
 
-def test_el_metodo_del_split_ya_no_existe():
+def test_ejemplo_base_TD_hueco_TN(transformer):
+    """TF5 16:00->23:37 TD: se parte en TD/TNL/TN, sin perder duración ni producción."""
+    escribir(transformer, [segmento("2026-09-22 16:00:00", "2026-09-22 23:37:00",
+                                    production="300", turn="TD")],
+             mes="09", nombre="septiembre")
+    df = transformer.transform_data(
+        transformer.read_line_data("TF_8", "2026", "09")
+    ).sort_values("Fecha_Hora_Inicio").reset_index(drop=True)
+
+    assert len(df) == 3
+    assert list(df["Turno"]) == ["TD", "TNL", "TN"]
+    assert list(df["Turno_Origen"]) == ["TD", "TD", "TD"]
+    assert list(df["Fecha_Inicio_Turno"].astype(str)) == ["2026-09-22"] * 3
+    assert [str(t) for t in df["Fecha_Hora_Inicio"]] == [
+        "2026-09-22 16:00:00", "2026-09-22 18:00:00", "2026-09-22 23:00:00",
+    ]
+    assert [str(t) for t in df["Fecha_Hora_Termino"]] == [
+        "2026-09-22 18:00:00", "2026-09-22 23:00:00", "2026-09-22 23:37:00",
+    ]
+    # Duración y producción se reparten sin perder nada por redondeo.
+    assert sum(df["Duracion(min)"]) == pytest.approx(7 * 60 + 37)
+    assert sum(df["Q_prod_total"]) == pytest.approx(300.0)
+
+
+def test_fin_de_semana_T0_se_declara_TNL(transformer):
+    """Un tramo T0 de fin de semana (sábado a lunes) se declara TNL de punta a punta."""
+    escribir(transformer, [segmento("2026-09-19 20:00:00", "2026-09-21 09:00:00",
+                                    production="0", turn="T0")],
+             mes="09", nombre="septiembre")
+    df = transformer.transform_data(
+        transformer.read_line_data("TF_8", "2026", "09")
+    ).sort_values("Fecha_Hora_Inicio").reset_index(drop=True)
+
+    assert len(df) == 2
+    assert list(df["Turno"]) == ["TNL", "TD"]
+    assert list(df["Turno_Origen"]) == ["T0", "T0"]
+    assert str(df.iloc[0]["Fecha_Hora_Termino"]) == "2026-09-21 08:00:00"
+    assert str(df.iloc[1]["Fecha_Hora_Inicio"]) == "2026-09-21 08:00:00"
+
+
+def test_feriado_en_dia_de_semana_pisa_el_turno_declarado(transformer):
+    """Un feriado marcado en Comentarios es TNL aunque el origen ya haya declarado TD."""
+    escribir(transformer, [segmento("2026-09-08 10:00:00", "2026-09-08 12:00:00",
+                                    turn="TD", production="80", comments="FERIADO")],
+             mes="09", nombre="septiembre")
+    df = transformer.transform_data(transformer.read_line_data("TF_8", "2026", "09"))
+
+    assert len(df) == 1
+    assert df.iloc[0]["Turno"] == "TNL"
+    assert df.iloc[0]["Turno_Origen"] == "TD"
+    assert df.iloc[0]["Q_prod_total"] == 80
+
+
+def test_el_metodo_del_split_de_medianoche_ya_no_existe():
+    """El split viejo -- un corte fijo a medianoche, sin importar el turno -- no vuelve."""
     assert not hasattr(DataTransformer, "_split_midnight_crossings")
     assert "Registro_Dividido" not in FUENTE.read_text(encoding="utf-8")
 
 
-def test_un_registro_que_cruza_medianoche_sigue_siendo_uno(transformer):
+def test_un_registro_que_cruza_medianoche_dentro_del_mismo_turno_sigue_siendo_uno(transformer):
+    """El cruce de medianoche no fragmenta por sí solo: sólo lo hace un borde de turno real."""
     escribir(transformer, [segmento("2026-03-10 22:00:00", "2026-03-11 04:33:00",
                                     production="4300", duration="393.0", turn="TN")])
     df = transformer.transform_data(transformer.read_line_data("TF_8", "2026", "03"))
@@ -66,17 +131,25 @@ def test_un_registro_que_cruza_medianoche_sigue_siendo_uno(transformer):
     assert len(df) == 1
     assert int(df.iloc[0]["Q_prod_total"]) == 4300
     assert str(df.iloc[0]["Fecha_Hora_Termino"]) == "2026-03-11 04:33:00"
+    assert str(df.iloc[0]["Fecha_Inicio_Turno"]) == "2026-03-10"
     assert "Registro_Dividido" not in df.columns
 
 
 def test_un_registro_de_varios_dias_conserva_su_duracion(transformer):
-    """El split de dos tramos descartaba los días del medio."""
+    """El split de dos tramos descartaba los días del medio.
+
+    Este intervalo cae antes de toda vigencia de horarios.json (la más
+    antigua empieza 2026-04-01): no hay horario contra el cual fragmentar, así
+    que se conserva entero, con el turno de origen, igual que hoy hace
+    `clasificar()` para `Caso.SIN_VIGENCIA`.
+    """
     escribir(transformer, [segmento("2026-03-10 21:00:00", "2026-03-20 10:14:58",
                                     duration="13755.0", production="0", turn="TN")])
     df = transformer.transform_data(transformer.read_line_data("TF_8", "2026", "03"))
 
     assert len(df) == 1
     assert float(str(df.iloc[0]["Duracion(min)"]).replace(",", ".")) == 13755.0
+    assert df.iloc[0]["Turno"] == "TN"
 
 
 def test_no_se_pierde_ni_se_duplica_ninguna_fila(transformer):
@@ -220,6 +293,88 @@ def test_una_detencion_se_clasifica_como_tal(transformer):
     df = transformer.transform_data(transformer.read_line_data("TF_8", "2026", "03"))
     assert df.iloc[0]["Tipo_registro"] == "detencion"
     assert df.iloc[0]["Q_prod_total"] == 0, "una detención no produce"
+
+
+# --------------------------------------------------------------------------
+# TN del viernes entrado el sábado (horarios.json no define sábado)
+# --------------------------------------------------------------------------
+
+def test_fecha_inicio_turno_de_una_fila_ya_en_sabado_es_el_viernes(transformer):
+    """Caso real (2026-07-25): una micro-parada TN a las 01:37 del sábado es la
+    cola del TN del viernes, que no tiene horario propio en sábado. Antes se
+    declaraba con Fecha_Inicio_Turno = sábado (la fecha de la propia fila);
+    debe ser viernes, el día en que ese turno arrancó.
+    """
+    escribir(transformer, [segmento("2026-07-25 01:37:40", "2026-07-25 01:37:47",
+                                    turn="TN", production="0")],
+             mes="07", nombre="julio")
+    df = transformer.transform_data(transformer.read_line_data("TF_8", "2026", "07"))
+
+    assert len(df) == 1
+    assert df.iloc[0]["Turno"] == "TN"
+    assert str(df.iloc[0]["Fecha_Inicio_Turno"]) == "2026-07-24"
+
+
+def test_lunes_de_madrugada_sin_TN_de_domingo_no_se_declara_TN(transformer):
+    """Caso real (2026-09-07, lunes): filas TN a las 00:00 y ~07:50-07:59
+    quedaban declaradas TN con Fecha_Inicio_Turno=domingo -- un día sin TN
+    definido -- porque la franja propia de "TN lunes" (23:00->08:00) se leía
+    sin distinguir la noche del lunes (válida) de su propia madrugada (que
+    sólo sería válida si domingo tuviera TN, y no lo tiene).
+    """
+    escribir(transformer, [segmento("2026-09-07 00:00:03", "2026-09-07 00:00:10",
+                                    turn="TN", production="0")],
+             mes="09", nombre="septiembre")
+    df = transformer.transform_data(transformer.read_line_data("TF_8", "2026", "09"))
+
+    assert len(df) == 1
+    assert df.iloc[0]["Turno"] == "TNL"
+    assert df.iloc[0]["Turno_Origen"] == "TN"
+    assert str(df.iloc[0]["Fecha_Inicio_Turno"]) == "2026-09-07"
+
+
+def test_el_TN_del_viernes_entrado_el_sabado_calcula_bien_el_turno(transformer):
+    """2026-06-20 es sábado; el TN del viernes (21:30->08:30) sigue corriendo.
+
+    Antes de `franja_vigente`/`ventana_turno`, una fila cuyo `start` ya caía en
+    el sábado quedaba sin `Hora_Termino_Turno`, sin `Periodo_Laboral` y sin
+    minutos extra aunque el origen ya trajera `TN`, porque sábado no tiene
+    horario propio en `horarios.json`. Ese mismo cómputo ahora decide además
+    dónde cortar el tramo: la segunda fila sigue produciendo después de las
+    08:30, así que se fragmenta en un tramo TN (hasta las 08:30) y uno TNL (lo
+    que sigue) -- lo extra ya no se mide comparando contra la hora de fin,
+    es directamente la duración del tramo TNL con producción.
+    """
+    filas = [
+        # Dentro del turno: no corresponde hora extra, no se fragmenta.
+        segmento("2026-06-20 02:00:00", "2026-06-20 03:00:00",
+                 turn="TN", production="100"),
+        # Sigue trabajando después de las 08:30: eso se parte en TN + TNL.
+        segmento("2026-06-20 08:00:00", "2026-06-20 09:15:00",
+                 turn="TN", production="100"),
+    ]
+    escribir(transformer, filas, mes="06", nombre="junio")
+    df = transformer.transform_data(
+        transformer.read_line_data("TF_8", "2026", "06")
+    ).sort_values("Fecha_Hora_Inicio").reset_index(drop=True)
+
+    assert len(df) == 3
+    dentro_del_turno, tramo_tn, tramo_tnl = df.iloc[0], df.iloc[1], df.iloc[2]
+
+    assert dentro_del_turno["Turno"] == "TN"
+    assert dentro_del_turno["Hora_Termino_Turno"] == "08:30"
+    assert dentro_del_turno["Periodo_Laboral"] == "Sí"
+    assert float(str(dentro_del_turno["Minutos_Extras"]).replace(",", ".")) == 0.0
+
+    assert tramo_tn["Turno"] == "TN"
+    assert str(tramo_tn["Fecha_Hora_Termino"]) == "2026-06-20 08:30:00"
+    assert tramo_tn["Hora_Termino_Turno"] == "08:30"
+    assert float(str(tramo_tn["Minutos_Extras"]).replace(",", ".")) == 0.0
+
+    assert tramo_tnl["Turno"] == "TNL"
+    assert tramo_tnl["Turno_Origen"] == "TN"
+    assert tramo_tnl["Periodo_Laboral"] == "No"
+    assert float(str(tramo_tnl["Minutos_Extras"]).replace(",", ".")) == pytest.approx(45.0)
 
 
 def test_el_consolidado_no_lleva_registro_dividido(transformer):
