@@ -179,7 +179,7 @@ El transformer aplica las siguientes operaciones sobre los datos crudos:
 ## Automatización (Windows Task Scheduler)
 
 Las definiciones de tarea importables están en [`deploy/`](deploy/README.md):
-la diaria a las 06:00 (`scripts/run_daily_etl.bat`) y la semanal los lunes a las
+la diaria a las 08:30 (`scripts/run_daily_etl.bat`) y la semanal los lunes a las
 09:00 (`scripts/run_weekly_report.bat`). Se importan con `schtasks /create /xml`
 tras reemplazar dos marcadores.
 

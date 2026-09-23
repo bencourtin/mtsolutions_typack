@@ -180,7 +180,7 @@ El paso 3 tiene que terminar con código 0 y dejar
 Las definiciones importables están en [`deploy/`](../deploy/README.md), con el
 procedimiento de sustitución de marcadores e importación con `schtasks`.
 
-Resumen: la diaria a las 06:00 con límite de 4 h, la semanal los lunes a las
+Resumen: la diaria a las 08:30 con límite de 4 h, la semanal los lunes a las
 09:00. Ambas con *"no iniciar una nueva instancia si ya está en ejecución"*.
 
 **Después de importar, correr la tarea a mano una vez** (`schtasks /run`) y
