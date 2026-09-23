@@ -296,6 +296,40 @@ def test_una_detencion_se_clasifica_como_tal(transformer):
 
 
 # --------------------------------------------------------------------------
+# Precisión numérica para Excel
+# --------------------------------------------------------------------------
+#
+# `duration` llega del raw con coma decimal ("13755,0"), así que pandas lo lee
+# como texto, no como número -- y una división exacta en segundos (1 seg =
+# 1/60 min) cae en un binario periódico de 16-20 dígitos
+# ("0,016666666666666666"), más de los 15 dígitos significativos que Excel
+# puede representar: los trunca o corrompe en silencio al abrir el CSV.
+
+def test_duracion_no_supera_los_15_digitos_significativos_de_excel(transformer):
+    """Un tramo de 1 segundo (1/60 min) es el caso que más decimales genera."""
+    escribir(transformer, [segmento("2026-09-22 17:59:59", "2026-09-22 18:00:30",
+                                    turn="TD", production="0")],
+             mes="09", nombre="septiembre")
+    df = transformer.transform_data(transformer.read_line_data("TF_8", "2026", "09"))
+
+    assert len(df) == 2  # cruza el borde TD/TNL de las 18:00
+    for valor in df["Duracion(min)"]:
+        texto = str(valor).replace(",", ".").split(".")
+        decimales = texto[1] if len(texto) > 1 else ""
+        assert len(decimales) <= 4, f"{valor!r} tiene más de 4 decimales"
+
+
+def test_duracion_con_coma_decimal_del_raw_se_redondea_sin_perderse(transformer):
+    """`duration="13755,0"` (coma, como llega del proveedor) no debe volverse NaN."""
+    escribir(transformer, [segmento("2026-03-10 21:00:00", "2026-03-20 10:14:58",
+                                    duration="13755,0", production="0", turn="TN")])
+    df = transformer.transform_data(transformer.read_line_data("TF_8", "2026", "03"))
+
+    assert len(df) == 1
+    assert df.iloc[0]["Duracion(min)"] == pytest.approx(13755.0)
+
+
+# --------------------------------------------------------------------------
 # TN del viernes entrado el sábado (horarios.json no define sábado)
 # --------------------------------------------------------------------------
 

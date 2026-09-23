@@ -341,6 +341,28 @@ class DataTransformer:
                (df['Desc_detencion'].notna() & df['Desc_detencion'].str.strip().ne(''))
         df.loc[mask, 'Tipo_registro'] = 'detencion'
 
+        # Redondear las columnas numéricas calculadas por división a 4
+        # decimales. Sin esto, una división exacta en segundos (1 seg = 1/60
+        # min) cae en un binario periódico de 16-20 dígitos
+        # ("0,016666666666666666"), que excede los 15 dígitos significativos
+        # que Excel puede representar: abre el CSV y trunca o corrompe esos
+        # decimales en silencio. El problema no lo inventa el split -- ya
+        # viene de la fuente (`duration` trae el mismo patrón en el crudo) --
+        # pero fragmentar por turno lo multiplica, así que se normaliza acá
+        # para toda fila, fragmentada o no.
+        for columna in ('Duracion(min)', 'Q_prod_total', 'Minutos_Extras'):
+            if columna in df.columns:
+                # El raw (y el propio `write_csv` de prueba) traen estos
+                # campos con coma decimal, así que pandas los lee como texto,
+                # no como número: `duration` llega literal "13755,0". Sin
+                # sacar la coma antes de `pd.to_numeric`, esos valores se
+                # leen como no numéricos y se pierden como NaN en vez de
+                # redondearse.
+                serie = df[columna]
+                if serie.dtype == object:
+                    serie = serie.astype(str).str.replace(',', '.', regex=False)
+                df[columna] = pd.to_numeric(serie, errors='coerce').round(4)
+
         # Reordenar columnas (solo las que existen en el DataFrame)
         valid_columns = [col for col in self.column_order if col in df.columns]
         remaining_columns = [col for col in df.columns if col not in valid_columns and col != 'Tipo_registro']
