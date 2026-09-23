@@ -43,9 +43,6 @@ logs/*
 venv/
 env/
 .env
-
-# Dependencias instaladas con `pip install --target` en el servidor (sin venv).
-vendor/
 ENV/
 env.bak/
 venv.bak/

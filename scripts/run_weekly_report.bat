@@ -12,24 +12,11 @@ setlocal enabledelayedexpansion
 for %%I in ("%~dp0..") do set "PROJECT_DIR=%%~fI"
 cd /d "%PROJECT_DIR%" || exit /b 1
 
-set "PYTHON_EXE="
-for /f "delims=" %%P in ('py -3 -c "import sys;print(sys.executable)" 2^>nul') do set "PYTHON_EXE=%%P"
-if not defined PYTHON_EXE (
-    echo ERROR: no se encontro un interprete de Python real via "py -3".
-    echo "python" a secas puede resolver al alias de Microsoft Store en vez de
-    echo un interprete real. Instalar el Python Launcher para Windows ^(py.exe,
-    echo ya viene con el instalador oficial de python.org^) o verificar el PATH
-    echo de la cuenta que corre esta tarea.
+set "PYTHON_EXE=%PROJECT_DIR%\.venv\Scripts\python.exe"
+if not exist "%PYTHON_EXE%" (
+    echo ERROR: no se encontro el entorno virtual en "%PYTHON_EXE%"
     exit /b 1
 )
-
-set "VENDOR_DIR=%PROJECT_DIR%\vendor"
-if not exist "%VENDOR_DIR%" (
-    echo ERROR: no se encontraron las dependencias en "%VENDOR_DIR%"
-    echo Instalar con: py -3 -m pip install --target vendor -r requirements\requirements.txt
-    exit /b 1
-)
-set "PYTHONPATH=%VENDOR_DIR%;%PROJECT_DIR%\src;%PROJECT_DIR%"
 
 set "PYTHONIOENCODING=utf-8"
 

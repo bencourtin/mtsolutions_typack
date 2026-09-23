@@ -66,32 +66,17 @@ cd D:\ETL
 git clone https://github.com/bencourtin/mtsolutions_typack.git
 cd mtsolutions_typack
 
-py -3 -m pip install --target vendor -r requirements\requirements.txt
+python -m venv .venv
+.venv\Scripts\python -m pip install --upgrade pip
+.venv\Scripts\python -m pip install -e .
 ```
 
-> **Usar `py -3`, no `python` a secas.** En muchas instalaciones de Windows
-> `python` resuelve al alias-stub de Microsoft Store
-> (`WindowsApps\python.exe`), que no es un intérprete real: sale con "no se
-> encontró Python" y código `9009` sin ejecutar nada. `py` es el lanzador
-> oficial (`py.exe`, instalado junto con Python desde python.org) y no cae en
-> esa trampa. Todos los comandos de este documento, y los `.bat` de `deploy/`,
-> usan `py -3` por eso.
+**`pip install -e .` no es opcional.** Es lo que hace importables los paquetes
+`typack_etl`, `config` y `scripts` desde cualquier directorio de trabajo. Sin eso,
+tanto el orquestador como el extractor fallan al importar.
 
-**No se usa `venv`.** Las dependencias de terceros quedan instaladas en
-`vendor\`, una carpeta propia del repo, con el Python del sistema. Lo que hace
-importables `typack_etl`, `config` y `scripts` no es una instalación (`pip
-install -e .`) sino `PYTHONPATH`: hay que apuntarlo a `vendor`, `src` y la raíz
-del repo, en ese orden. Los lanzadores (`scripts\*.bat`) ya lo arman solo; para
-correr algo a mano hay que armarlo también:
-
-```powershell
-$env:PYTHONPATH = "$PWD\vendor;$PWD\src;$PWD"
-```
-
-Cada verificación y comando de este documento asume que `PYTHONPATH` ya está
-seteado así en la sesión. `requirements/requirements.txt` es la fuente real de
-las dependencias acá — a diferencia del desarrollo local, donde
-`pyproject.toml` alimenta un `pip install -e .` sobre un `.venv`.
+`requirements/requirements.txt` existe como referencia legible de las
+dependencias, pero la instalación real sale de `pyproject.toml`.
 
 ---
 
@@ -160,7 +145,7 @@ las 347.478 filas de 2024-2026 con cero falsos positivos.
 Fuera de la corrida, `scripts/verificar_horario.py` hace la comprobación
 independiente contra el campo `turn`, sobre todo el histórico:
 
-    py -3 scripts\verificar_horario.py --raw
+    .venv\Scripts\python scripts\verificar_horario.py --raw
 
 ### Lo que casi nunca hay que tocar
 
@@ -176,13 +161,13 @@ No programar nada hasta que los tres pasos den bien.
 
 ```powershell
 REM 1. La suite completa, sin red y sin tocar producción
-py -3 -m pytest
+.venv\Scripts\python -m pytest
 
 REM 2. Que el correo salga
-py -3 scripts\run_daily_etl.py --test-email
+.venv\Scripts\python scripts\run_daily_etl.py --test-email
 
 REM 3. Una corrida diaria completa, a mano
-py -3 scripts\run_daily_etl.py
+.venv\Scripts\python scripts\run_daily_etl.py
 ```
 
 El paso 3 tiene que terminar con código 0 y dejar
@@ -215,16 +200,16 @@ REM 1. Deshabilitar la tarea diaria mientras dure
 schtasks /change /tn "ETL Typack - Diario" /disable
 
 REM 2. Ver el plan sin tocar nada
-py -3 scripts\recarga_historica.py --dry-run
+.venv\Scripts\python scripts\recarga_historica.py --dry-run
 
 REM 3. Vaciar el destino (hay respaldo previo en Data_MTSolutions)
 REM    raw\ y processed\ completos
 
 REM 4. Recargar
-py -3 scripts\recarga_historica.py
+.venv\Scripts\python scripts\recarga_historica.py
 
 REM 5. Reprocesar TODO, sin --incremental
-py -3 -m src.typack_etl.transformer.transformer
+.venv\Scripts\python -m src.typack_etl.transformer.transformer
 
 REM 6. Rehabilitar
 schtasks /change /tn "ETL Typack - Diario" /enable
@@ -267,19 +252,9 @@ De más a menos detalle:
 la cuenta de la tarea no ve las rutas. Verificar que Drive esté en modo Reflejar
 y que el `.env` no mencione `G:`.
 
-**"No se encontraron las dependencias".** El `.bat` busca `vendor\` en la raíz
-del repo (instalado con `pip install --target vendor`, sin venv). Falta
-instalar las dependencias, o el repositorio se movió.
-
-**Código `9009` / "no se encontró Python".** El `.bat` no encontró un
-intérprete real vía `py -3` (ver la nota de §3). Confirmar que el Python
-Launcher (`py.exe`) esté instalado y en el `PATH` de la cuenta que corre la
-tarea — no alcanza con que ande para el usuario interactivo si la tarea corre
-bajo otra cuenta o sin sesión.
-
-**`ModuleNotFoundError` al correr un comando a mano.** Falta `PYTHONPATH`. Los
-`.bat` lo arman solos; para correr algo a mano hay que setearlo primero (ver
-§3): `$env:PYTHONPATH = "$PWD\vendor;$PWD\src;$PWD"`.
+**"No se encontró el entorno virtual".** El `.bat` busca
+`.venv\Scripts\python.exe` en la raíz del repo. Falta crear el venv, o el
+repositorio se movió.
 
 **El ETL sale con código 2.** No es un error: había otra corrida en curso y esta
 se omitió. Si se repite todos los días, quedó un lock huelgo en
@@ -299,18 +274,18 @@ línea falló está en el `results_*.csv`.
 
 ```powershell
 REM Estadísticas de la semana (sólo lectura)
-py -3 scripts\stats_tracker.py
+.venv\Scripts\python scripts\stats_tracker.py
 
 REM Reporte semanal a mano
-py -3 scripts\run_daily_etl.py --weekly-report
+.venv\Scripts\python scripts\run_daily_etl.py --weekly-report
 
 REM Una línea puntual, ventana a medida
-py -3 -m src.typack_etl.extractor.pipelines.extractor_30m --devid 1273 --days 60
+.venv\Scripts\python -m src.typack_etl.extractor.pipelines.extractor_30m --devid 1273 --days 60
 
 REM Actualizar el código en el servidor
 git pull
-py -3 -m pip install --target vendor -r requirements\requirements.txt --upgrade
-py -3 -m pytest
+.venv\Scripts\python -m pip install -e .
+.venv\Scripts\python -m pytest
 ```
 
 ---
