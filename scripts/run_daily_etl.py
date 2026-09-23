@@ -295,10 +295,10 @@ def run_extractor(logger: logging.Logger) -> tuple[bool, int, str]:
     """
     Ejecuta el extractor de ventana móvil.
 
-    Usa `extractor_30m` y no `extractor_mensual`: la ventana móvil vuelve a
-    consultar los últimos EXTRACTOR_WINDOW_DAYS días, de modo que una detención
-    reclasificada después del cierre de mes sí se re-extrae. El extractor
-    mensual quedó reservado para recargas históricas puntuales.
+    La ventana móvil vuelve a consultar los últimos EXTRACTOR_WINDOW_DAYS
+    días, de modo que una detención reclasificada después del cierre de mes sí
+    se re-extrae. Las recargas de meses cerrados van por
+    `scripts/recarga_historica.py`.
 
     Returns:
         tuple: (success, rows_extracted, error_message)

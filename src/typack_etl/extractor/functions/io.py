@@ -1,9 +1,9 @@
 """
 Utilidades compartidas de E/S para los pipelines del extractor.
 
-Este módulo centraliza lo que antes estaba duplicado (y ya divergido) en
-`extractor_mensual.py` y `extractor_30m.py`: normalización de la respuesta de
-la API, formato de valores, escritura de CSV y bitácoras de corrida.
+Este módulo centraliza lo que antes estaba duplicado (y ya divergido) entre
+los pipelines del extractor: normalización de la respuesta de la API, formato
+de valores, escritura de CSV y bitácoras de corrida.
 
 Dos garantías que aportan estas funciones frente a las copias anteriores:
 

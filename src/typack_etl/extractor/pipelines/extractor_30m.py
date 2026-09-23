@@ -1,10 +1,11 @@
 """
 Extractor de ventana móvil del reporte "sabana". Pipeline del ETL diario.
 
-Es el pipeline correcto para capturar reasignaciones de detenciones: a
-diferencia de `extractor_mensual.py`, su ventana no se corta el día 1 de cada
-mes, de modo que una detención reclasificada días después del evento se vuelve
-a consultar mientras siga dentro de la ventana.
+Es el pipeline correcto para capturar reasignaciones de detenciones: su
+ventana no se corta el día 1 de cada mes, de modo que una detención
+reclasificada días después del evento se vuelve a consultar mientras siga
+dentro de la ventana. Para recargar meses cerrados está
+`scripts/recarga_historica.py`, que maneja este mismo pipeline.
 
 Reglas del rango por defecto (día operativo, no día calendario):
   - corte = las 08:00 locales (el cambio de turno TD/TN) del día del que se

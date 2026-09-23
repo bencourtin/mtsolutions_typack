@@ -167,15 +167,9 @@ qué archivo va cada registro y el transformer calcula `Año`, `Mes` y
 `Dia_Operativo` con la misma regla. Por eso **todas las filas del archivo de
 marzo dicen `Mes = 3`**, sin excepción.
 
-### Sin división de medianoche
-
-El transformer ya no parte los registros que cruzan la medianoche ni reparte su
-producción entre dos días. Un turno de noche `22:00 → 04:33` queda como **un
-solo registro**, con su producción y su hora de término reales, contado entero
-en el día operativo en que empezó — que es justamente lo que el día operativo
-resuelve sin necesidad de cortar nada.
-
-La columna `Registro_Dividido` desapareció del consolidado.
+Un registro que cruza la medianoche, como un turno de noche `22:00 → 04:33`,
+es **un solo registro**, con su producción y su hora de término reales, contado
+entero en el día operativo en que empezó.
 
 ---
 
@@ -773,7 +767,7 @@ pytest
 | `test_resiliencia.py` | Reintentos, estado por línea y aislamiento de fallos |
 | `test_orquestador.py` | Cuándo transformar, cuándo publicar y qué informa el reporte |
 | `test_pipeline.py` | El extractor de punta a punta con la API simulada |
-| `test_transformer.py` | Mes operativo, ausencia de split, dtypes |
+| `test_transformer.py` | Mes operativo, registros que cruzan medianoche, dtypes |
 
 Las garantías que sostienen el diseño, verificadas contra los archivos reales
 del repositorio:

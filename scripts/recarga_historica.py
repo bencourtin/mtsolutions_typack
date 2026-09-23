@@ -9,10 +9,9 @@ columna `order`. Sin `record_key` el consolidado no puede unirse con el libro
 de auditoría, así que la trazabilidad del BI existe sólo para los últimos 35
 días. Este script vuelve a bajar todo el rango con el extractor nuevo.
 
-Reemplaza a `run_historico_2025_2026.bat`, que no sirve para esto: cubría un
-rango incompleto, usaba medianoche en vez del corte operativo, y llamaba a
-`extractor_mensual`, que **no estampa traza ni audita** (ni siquiera importa
-`typack_etl.audit`).
+Reemplazó a `run_historico_2025_2026.bat` y al `extractor_mensual`, borrados
+el 2026-09-21: cubrían un rango incompleto, usaban medianoche en vez del corte
+operativo y no estampaban traza ni auditaban.
 
 Por qué NO se usa `--no-audit`
 ------------------------------

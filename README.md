@@ -19,7 +19,6 @@ mtsolutions_typack/
 │   └── typack_etl/
 │       ├── extractor/
 │       │   ├── pipelines/
-│       │   │   ├── extractor_mensual.py   # Extracción mensual
 │       │   │   └── extractor_30m.py       # Extracción ventana móvil 30 días
 │       │   └── services/
 │       │       ├── auth.py                # Autenticación JWT contra API
@@ -131,16 +130,6 @@ python -m src.typack_etl.extractor.pipelines.extractor_30m --devid 1273 \
     --start-date "2026-03-01 12:00:00" --end-date "2026-04-01 12:00:00"
 ```
 
-### Extractor mensual
-
-Sólo para recargas puntuales. **No estampa las columnas de trazabilidad ni
-audita**, así que no sirve para reconstruir la base: para eso está
-`scripts/recarga_historica.py`.
-
-```bash
-python -m src.typack_etl.extractor.pipelines.extractor_mensual --devid 1268
-```
-
 ### Recarga histórica
 
 ```bash
@@ -182,11 +171,10 @@ python scripts/notify.py --test
 El transformer aplica las siguientes operaciones sobre los datos crudos:
 
 1. **Renombrado de columnas** — De inglés API a español (ej: `product` → `Producto`)
-2. **División de registros en medianoche** — Registros que cruzan las 00:00 se dividen en dos, redistribuyendo producción y duración proporcionalmente
-3. **Normalización de códigos de detención** — Unificación de variantes ("Periodo no laboral", "PERIODO NO LABORAL" → "Período no laboral")
-4. **Clasificación de turnos no usados** — Detenciones "No asignado" en Termoformado se reclasifican como "Fines de Semana" o "Turno No Usado" según horario
-5. **Cálculo de minutos extras** — Tiempo trabajado después del horario de término del turno
-6. **Clasificación de registros** — Producción, Planificado, No planificado, No producido
+2. **Normalización de códigos de detención** — Unificación de variantes ("Periodo no laboral", "PERIODO NO LABORAL" → "Período no laboral")
+3. **Clasificación de turnos no usados** — Detenciones "No asignado" en Termoformado se reclasifican como "Fines de Semana" o "Turno No Usado" según horario
+4. **Cálculo de minutos extras** — Tiempo trabajado después del horario de término del turno
+5. **Clasificación de registros** — Producción, Planificado, No planificado, No producido
 
 ## Automatización (Windows Task Scheduler)
 

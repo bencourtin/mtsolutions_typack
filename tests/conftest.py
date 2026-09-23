@@ -52,7 +52,6 @@ def sin_produccion(monkeypatch, tmp_path):
     import importlib
     for nombre in (
         "typack_etl.extractor.pipelines.extractor_30m",
-        "typack_etl.extractor.pipelines.extractor_mensual",
         "typack_etl.transformer.transformer",
         # Los scripts de operación también guardan su propia referencia, y son
         # los que resuelven las rutas por defecto de una corrida real.
@@ -91,13 +90,12 @@ def api_falsa(monkeypatch):
         api_falsa(filas)                      # siempre las mismas
         api_falsa(lambda t, s, e, d: ...)     # respuesta calculada
     """
-    from typack_etl.extractor.pipelines import extractor_30m, extractor_mensual
+    from typack_etl.extractor.pipelines import extractor_30m
 
     def instalar(respuesta):
         fn = respuesta if callable(respuesta) else (lambda t, s, e, d=None: list(respuesta))
-        for modulo in (extractor_30m, extractor_mensual):
-            monkeypatch.setattr(modulo, "get_token", lambda: "token-de-prueba")
-            monkeypatch.setattr(modulo, "get_sabana_report", fn)
+        monkeypatch.setattr(extractor_30m, "get_token", lambda: "token-de-prueba")
+        monkeypatch.setattr(extractor_30m, "get_sabana_report", fn)
         return fn
 
     return instalar

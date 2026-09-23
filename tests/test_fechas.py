@@ -4,7 +4,7 @@ from datetime import date, datetime, time, timedelta
 
 import pytest
 
-from typack_etl.extractor.pipelines import extractor_30m, extractor_mensual
+from typack_etl.extractor.pipelines import extractor_30m
 from typack_etl.extractor.utils.date_utils import (
     a_api,
     a_local,
@@ -330,34 +330,6 @@ def test_un_rango_invertido_aborta():
     )
     with pytest.raises(SystemExit):
         extractor_30m._resolve_window(args)
-
-
-# --------------------------------------------------------------------------
-# Mes calendario del extractor mensual
-# --------------------------------------------------------------------------
-
-@pytest.mark.parametrize("hoy,desde,hasta", [
-    ("2026-08-15 10:00:00", date(2026, 8, 1), date(2026, 9, 1)),
-    ("2026-12-20 10:00:00", date(2026, 12, 1), date(2027, 1, 1)),
-    ("2026-02-05 10:00:00", date(2026, 2, 1), date(2026, 3, 1)),
-    # Mes que contiene el cambio de hora: no empieza y termina a la misma hora.
-    ("2026-04-15 10:00:00", date(2026, 4, 1), date(2026, 5, 1)),
-])
-def test_el_mes_operativo_va_del_dia_1_al_dia_1(monkeypatch, hoy, desde, hasta):
-    monkeypatch.setattr(extractor_mensual, "now_planta", lambda: dt(hoy))
-    assert extractor_mensual._current_month_range_strings() == (
-        f"{desde} {corte_txt(desde)}",
-        f"{hasta} {corte_txt(hasta)}",
-    )
-
-
-def test_el_mes_de_abril_cruza_el_cambio_de_hora(monkeypatch):
-    """Caso concreto del parametrizado anterior, para que se lea el efecto."""
-    monkeypatch.setattr(extractor_mensual, "now_planta", lambda: dt("2026-04-15 10:00:00"))
-    assert extractor_mensual._current_month_range_strings() == (
-        "2026-04-01 11:00:00",   # el pais todavia en verano
-        "2026-05-01 12:00:00",   # ya en invierno
-    )
 
 
 # --------------------------------------------------------------------------

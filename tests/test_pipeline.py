@@ -10,7 +10,7 @@ from conftest import leer_csv, segmento
 from typack_etl.audit import cdc
 from typack_etl.audit.ledger import LEDGER_FILENAME, leer_ultimas_corridas, read_ledger
 from typack_etl.extractor.functions.io import read_csv_rows
-from typack_etl.extractor.pipelines import extractor_30m, extractor_mensual
+from typack_etl.extractor.pipelines import extractor_30m
 
 
 def dt(texto):
@@ -208,52 +208,3 @@ def test_la_bitacora_resume_los_cambios_por_particion(rutas, api_falsa):
     assert "cambios:" in detalle
 
 
-# --------------------------------------------------------------------------
-# Extractor mensual: recargas históricas
-# --------------------------------------------------------------------------
-
-def test_una_recarga_parcial_no_borra_el_resto_del_mes(rutas, api_falsa, tmp_path):
-    destino = tmp_path / "produccion_2026_mayo_TF_9.csv"
-    from typack_etl.extractor.functions.io import write_csv
-    write_csv([segmento(f"2026-05-{d:02d} 10:00:00", f"2026-05-{d:02d} 11:00:00", production="10")
-               for d in range(1, 32)], destino)
-
-    # La ventana en planta va del 1-may 08:00 al 16-may 08:00, así que la API
-    # debe reportar los días 1 a 15: lo que no reporte dentro de la ventana se
-    # borra, que es justamente el comportamiento deseado.
-    api_falsa([segmento(f"2026-05-{d:02d} 10:00:00", f"2026-05-{d:02d} 11:00:00", production="999")
-               for d in range(1, 16)])
-    extractor_mensual.main([
-        "--start-date", "2026-05-01 12:00:00",
-        "--end-date", "2026-05-16 12:00:00",
-        "--devid", "1274",
-        "--output", str(destino),
-        "--logs-dir", str(rutas["logs"]),
-    ])
-
-    filas = {r["start"]: r for r in read_csv_rows(destino)}
-    assert len(filas) == 31, "el resto del mes debe conservarse"
-    assert filas["2026-05-10 10:00:00"]["production"] == "999", "el tramo recargado se actualiza"
-    assert filas["2026-05-20 10:00:00"]["production"] == "10", "lo de afuera queda intacto"
-
-
-def test_lo_que_la_api_no_reporta_dentro_del_rango_se_borra(rutas, api_falsa, tmp_path):
-    """Contracara del test anterior: dentro de la ventana manda la API."""
-    destino = tmp_path / "produccion_2026_mayo_TF_9.csv"
-    from typack_etl.extractor.functions.io import write_csv
-    write_csv([segmento(f"2026-05-{d:02d} 10:00:00", f"2026-05-{d:02d} 11:00:00")
-               for d in range(1, 32)], destino)
-
-    api_falsa([segmento(f"2026-05-{d:02d} 10:00:00", f"2026-05-{d:02d} 11:00:00")
-               for d in range(1, 16) if d != 7])
-    extractor_mensual.main([
-        "--start-date", "2026-05-01 12:00:00",
-        "--end-date", "2026-05-16 12:00:00",
-        "--devid", "1274",
-        "--output", str(destino),
-        "--logs-dir", str(rutas["logs"]),
-    ])
-
-    filas = {r["start"] for r in read_csv_rows(destino)}
-    assert "2026-05-07 10:00:00" not in filas
-    assert len(filas) == 30
